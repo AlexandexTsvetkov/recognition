@@ -1,0 +1,72 @@
+server:
+  port: 8081
+app:
+  speechkit:
+    endpoint: stt.api.cloud.yandex.net:443
+    api-key: ${YANDEX_API_KEY}
+    model: general
+    timeout: 30s
+    recognition:
+      model: general:rc
+      enable-punctuation: true
+      enable-literature-text: true
+      enable-profanity-filter: false
+      language-code: ru-RU
+      enable-speaker-analysis: false
+      recognition-timeout: 60
+      max-retry-attempts: 3
+
+  kafka:
+    topic: speech-recognition-results
+
+spring:
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 10MB
+      max-request-size: 10MB
+      file-size-threshold: 2KB
+  web:
+    resources:
+      add-mappings: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 1
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      speechkit-api:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+  retry:
+    instances:
+      speechkit-api:
+        max-attempts: 3
+        wait-duration: 2s
+  ratelimiter:
+    instances:
+      speechkit-api:
+        limit-for-period: 10
+        limit-refresh-period: 1s
+        timeout-duration: 5s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.example.recognition: INFO
+    com.example.recognition.grpc: DEBUG
