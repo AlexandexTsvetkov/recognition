@@ -69,4 +69,4 @@ management:
 logging:
   level:
     com.example.recognition: INFO
-    com.example.recognition.grpc: DEBUG
+    com.example.recognition.grpc: INFO
