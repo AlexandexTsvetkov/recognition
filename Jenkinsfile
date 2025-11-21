@@ -13,21 +13,19 @@ pipeline {
     stages {
         stage('Build & Test recognition') {
             steps {
-                dir("recognition") { // Переходим в папку recognition
-                    sh 'mvn package' // Собираем мавеном recognition
-                }
+                sh 'mvn package' // Собираем мавеном recognition
             }
 
             post {
                 success {
-                    junit 'recognition/target/surefire-reports/**/*.xml' // Передадим результаты тестов в Jenkins
+                    junit 'target/surefire-reports/**/*.xml' // Передадим результаты тестов в Jenkins
                 }
             }
         }
 
         stage('Save artifacts') {
             steps {
-                archiveArtifacts(artifacts: 'recognition/target/recognition-0.0.1-SNAPSHOT.jar')
+                archiveArtifacts(artifacts: 'target/recognition-0.0.1-SNAPSHOT.jar')
             }
         }
     }
