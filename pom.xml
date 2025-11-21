@@ -34,7 +34,7 @@
         <kafka-clients.version>3.6.1</kafka-clients.version>
 
         <!--       Plugins       -->
-        <maven-compiler-plugin.version>3.11.0</maven-compiler-plugin.version>
+        <maven-compiler-plugin.version>3.8.1</maven-compiler-plugin.version>
         <avro-maven-plugin.version>${avro.version}</avro-maven-plugin.version>
         <protobuf-plugin.version>2.4.0</protobuf-plugin.version>
     </properties>
