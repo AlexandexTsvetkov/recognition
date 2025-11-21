@@ -6,8 +6,8 @@ pipeline {
     }
 
     tools {
-        maven 'maven-3.8.1' // Для сборки recognition нужен Maven
-        jdk 'jdk21' // И Java Developer Kit нужной версии
+        maven 'Maven-3.8.1' // Для сборки recognition нужен Maven
+        jdk 'JDK21' // И Java Developer Kit нужной версии
     }
 
     stages {
