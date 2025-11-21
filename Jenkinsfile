@@ -27,7 +27,7 @@ pipeline {
 
         stage('Save artifacts') {
             steps {
-                archiveArtifacts(artifacts: '**/target/*.jar')
+                archiveArtifacts(artifacts: 'recognition/target/recognition-0.0.1-SNAPSHOT.jar')
             }
         }
     }
