@@ -1,0 +1,57 @@
+server:
+  port: 8083
+
+app:
+  storage:
+    endpoint: ${STORAGE_ENDPOINT:http://localhost:9000}
+    access-key: ${STORAGE_ACCESS_KEY:minioadmin}
+    secret-key: ${STORAGE_SECRET_KEY:minioadmin}
+    bucket-name: ${STORAGE_BUCKET_NAME:recognition-audio}
+    audio-prefix: ${STORAGE_AUDIO_PREFIX:audio/}
+  speechkit:
+    endpoint: ${SPEECHKIT_ENDPOINT:stt.api.cloud.yandex.net:443}
+    api-key: ${YANDEX_API_KEY}
+    recognition:
+      model: general:rc
+      enable-punctuation: true
+      enable-literature-text: true
+      enable-profanity-filter: false
+      language-code: ru-RU
+      recognition-timeout: 60
+      max-retry-attempts: 3
+
+spring:
+  application:
+    name: recognition-processing-service
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      speechkit-api:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+  retry:
+    instances:
+      speechkit-api:
+        max-attempts: 3
+        wait-duration: 2s
+  ratelimiter:
+    instances:
+      speechkit-api:
+        limit-for-period: 10
+        limit-refresh-period: 1s
+        timeout-duration: 5s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+
+logging:
+  level:
+    ru.grafit.recognition.processing: INFO
+

@@ -1,0 +1,36 @@
+server:
+  port: 8080
+
+app:
+  request-service:
+    url: ${REQUEST_SERVICE_URL:http://localhost:8082}
+  storage:
+    endpoint: ${STORAGE_ENDPOINT:http://localhost:9000}
+    access-key: ${STORAGE_ACCESS_KEY:minioadmin}
+    secret-key: ${STORAGE_SECRET_KEY:minioadmin}
+    bucket-name: ${STORAGE_BUCKET_NAME:recognition-audio}
+    audio-prefix: ${STORAGE_AUDIO_PREFIX:audio/}
+
+spring:
+  application:
+    name: recognition-api-gateway
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    ru.grafit.recognition.gateway: DEBUG
+    org.springframework.web: DEBUG
+
