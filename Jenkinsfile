@@ -21,11 +21,9 @@ pipeline {
             }
         }
 
-        stage('Build Common Module') {
+        stage('Build All Modules') {
             steps {
-                dir('recognition-common') {
-                    sh 'mvn clean install -DskipTests'
-                }
+                sh 'mvn clean install -DskipTests'
             }
         }
 
@@ -36,7 +34,7 @@ pipeline {
                 }
             }
             post {
-                success {
+                always {
                     junit 'recognition-api-gateway/target/surefire-reports/**/*.xml'
                 }
             }
@@ -49,7 +47,7 @@ pipeline {
                 }
             }
             post {
-                success {
+                always {
                     junit 'recognition-request-service/target/surefire-reports/**/*.xml'
                 }
             }
@@ -62,7 +60,7 @@ pipeline {
                 }
             }
             post {
-                success {
+                always {
                     junit 'recognition-processing-service/target/surefire-reports/**/*.xml'
                 }
             }
@@ -75,15 +73,9 @@ pipeline {
                 }
             }
             post {
-                success {
+                always {
                     junit 'recognition-result-service/target/surefire-reports/**/*.xml'
                 }
-            }
-        }
-
-        stage('Build All Modules') {
-            steps {
-                sh 'mvn clean install'
             }
         }
 
@@ -99,7 +91,8 @@ pipeline {
 
     post {
         always {
-            publishTestResults testResultsPattern: '**/target/surefire-reports/**/*.xml'
+            // Замените publishTestResults на junit для всех модулей
+            junit '**/target/surefire-reports/**/*.xml'
         }
         success {
             echo 'Build completed successfully!'
@@ -109,4 +102,3 @@ pipeline {
         }
     }
 }
-
