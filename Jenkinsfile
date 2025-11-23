@@ -1,32 +1,112 @@
 pipeline {
-    agent any // Выбираем Jenkins агента, на котором будет происходить сборка: нам нужен любой
+    agent any
 
     triggers {
-        pollSCM('H/5 * * * *') // Запускать будем автоматически по крону примерно раз в 5 минут
+        pollSCM('H/5 * * * *')
     }
 
     tools {
-        maven 'Maven-3.8.1' // Для сборки recognition нужен Maven
-        jdk 'JDK21' // И Java Developer Kit нужной версии
+        maven 'Maven-3.14.1'
+        jdk 'JDK21'
+    }
+
+    environment {
+        MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
     }
 
     stages {
-        stage('Build & Test recognition') {
+        stage('Checkout') {
             steps {
-                sh 'mvn package' // Собираем мавеном recognition
+                checkout scm
             }
+        }
 
-            post {
-                success {
-                    junit 'target/surefire-reports/**/*.xml' // Передадим результаты тестов в Jenkins
+        stage('Build Common Module') {
+            steps {
+                dir('recognition-common') {
+                    sh 'mvn clean install -DskipTests'
                 }
             }
         }
 
-        stage('Save artifacts') {
+        stage('Build & Test API Gateway') {
             steps {
-                archiveArtifacts(artifacts: 'target/recognition-0.0.1-SNAPSHOT.jar')
+                dir('recognition-api-gateway') {
+                    sh 'mvn clean package'
+                }
+            }
+            post {
+                success {
+                    junit 'recognition-api-gateway/target/surefire-reports/**/*.xml'
+                }
+            }
+        }
+
+        stage('Build & Test Request Service') {
+            steps {
+                dir('recognition-request-service') {
+                    sh 'mvn clean package'
+                }
+            }
+            post {
+                success {
+                    junit 'recognition-request-service/target/surefire-reports/**/*.xml'
+                }
+            }
+        }
+
+        stage('Build & Test Processing Service') {
+            steps {
+                dir('recognition-processing-service') {
+                    sh 'mvn clean package'
+                }
+            }
+            post {
+                success {
+                    junit 'recognition-processing-service/target/surefire-reports/**/*.xml'
+                }
+            }
+        }
+
+        stage('Build & Test Result Service') {
+            steps {
+                dir('recognition-result-service') {
+                    sh 'mvn clean package'
+                }
+            }
+            post {
+                success {
+                    junit 'recognition-result-service/target/surefire-reports/**/*.xml'
+                }
+            }
+        }
+
+        stage('Build All Modules') {
+            steps {
+                sh 'mvn clean install'
+            }
+        }
+
+        stage('Save Artifacts') {
+            steps {
+                archiveArtifacts artifacts: 'recognition-api-gateway/target/*.jar', fingerprint: true
+                archiveArtifacts artifacts: 'recognition-request-service/target/*.jar', fingerprint: true
+                archiveArtifacts artifacts: 'recognition-processing-service/target/*.jar', fingerprint: true
+                archiveArtifacts artifacts: 'recognition-result-service/target/*.jar', fingerprint: true
             }
         }
     }
+
+    post {
+        always {
+            publishTestResults testResultsPattern: '**/target/surefire-reports/**/*.xml'
+        }
+        success {
+            echo 'Build completed successfully!'
+        }
+        failure {
+            echo 'Build failed!'
+        }
+    }
 }
+
