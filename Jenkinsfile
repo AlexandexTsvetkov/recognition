@@ -12,6 +12,7 @@ pipeline {
 
     environment {
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
+        SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
     }
 
     stages {
@@ -21,103 +22,179 @@ pipeline {
             }
         }
 
-        stage('Build All Modules') {
+        stage('Dependency Check (SAST)') {
+            steps {
+                script {
+                    // Сканирование зависимостей на уязвимости
+                    dependencyCheck arguments: '''
+                        --scan .
+                        --format HTML
+                        --format JSON
+                        --out ./reports/dependency-check
+                        --enableExperimental
+                    ''', odcInstallation: 'OWASP-Dependency-Check'
+
+                    // Публикация результатов
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/dependency-check/*.html', fingerprint: false
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'reports/dependency-check',
+                        reportFiles: 'dependency-check-report.html',
+                        reportName: 'Dependency Check Report'
+                    ])
+                }
+            }
+        }
+
+        stage('Build & Code Coverage') {
             steps {
                 sh 'mvn clean install -DskipTests'
-            }
-        }
-
-        stage('Build & Test API Gateway') {
-            steps {
-                dir('recognition-api-gateway') {
-                    sh 'mvn clean package'
-                }
+                // Подготавливаем JaCoCo для сбора покрытия
+                sh 'mvn jacoco:prepare-agent test jacoco:report'
             }
             post {
                 always {
-                    junit 'recognition-api-gateway/target/surefire-reports/*.xml'
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'target/site/jacoco',
+                        reportFiles: 'index.html',
+                        reportName: 'JaCoCo Code Coverage'
+                    ])
                 }
             }
         }
 
-        stage('Build & Test Request Service') {
+        stage('SonarCloud Analysis') {
             steps {
-                dir('recognition-request-service') {
-                    sh 'mvn clean package'
-                }
-            }
-            post {
-                always {
-                    junit 'recognition-request-service/target/surefire-reports/*.xml'
+                script {
+                    // Анализ кода с помощью SonarCloud
+                    withSonarQubeEnv('SonarCloud') { // Настроить SonarCloud в Jenkins
+                        sh """
+                            mvn sonar:sonar \
+                            -Dsonar.projectKey=recognition \  // Замените на ваш project key из SonarCloud
+                            -Dsonar.organization=AlexandexTsvetkov \  // Замените на вашу организацию
+                            -Dsonar.host.url=https://sonarcloud.io \
+                            -Dsonar.login=${SONAR_CLOUD_TOKEN} \
+                            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+                            -Dsonar.java.binaries=target/classes \
+                            -Dsonar.sourceEncoding=UTF-8 \
+                            -Dsonar.sources=src/main/java \
+                            -Dsonar.tests=src/test/java
+                        """
+                    }
                 }
             }
         }
 
-        stage('Build & Test Processing Service') {
-            steps {
-                dir('recognition-processing-service') {
-                    sh 'mvn clean package'
+        stage('Build & Test Individual Services') {
+            parallel {
+                stage('API Gateway') {
+                    steps {
+                        dir('recognition-api-gateway') {
+                            sh 'mvn clean package'
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'recognition-api-gateway/target/surefire-reports/*.xml'
+                        }
+                    }
                 }
-            }
-            post {
-                always {
-                    junit 'recognition-processing-service/target/surefire-reports/*.xml'
+                stage('Request Service') {
+                    steps {
+                        dir('recognition-request-service') {
+                            sh 'mvn clean package'
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'recognition-request-service/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Processing Service') {
+                    steps {
+                        dir('recognition-processing-service') {
+                            sh 'mvn clean package'
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'recognition-processing-service/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Result Service') {
+                    steps {
+                        dir('recognition-result-service') {
+                            sh 'mvn clean package'
+                        }
+                    }
                 }
             }
         }
 
-        stage('Build & Test Result Service') {
+        stage('SonarCloud Quality Gate') {
             steps {
-                dir('recognition-result-service') {
-                    sh 'mvn clean package'
+                script {
+                    // Ожидание и проверка Quality Gate
+                    timeout(time: 15, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
                 }
             }
-//             post {
-//                 always {
-//                     junit 'recognition-result-service/target/surefire-reports/*.xml'
-//                 }
-//             }
         }
 
         stage('Save Artifacts') {
             steps {
-                archiveArtifacts artifacts: 'recognition-api-gateway/target/*.jar', fingerprint: true
-                archiveArtifacts artifacts: 'recognition-request-service/target/*.jar', fingerprint: true
-                archiveArtifacts artifacts: 'recognition-processing-service/target/*.jar', fingerprint: true
-                archiveArtifacts artifacts: 'recognition-result-service/target/*.jar', fingerprint: true
+                archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
             }
         }
     }
 
     post {
         always {
-            // Замените publishTestResults на junit для всех модулей
             junit '**/target/surefire-reports/*.xml'
         }
         success {
             script {
-                        // Отправка в Telegram при успешной сборке
-                        def telegramMessage = "Саня собрал приложение. ✅"
-                        sh """
-                            curl -X POST -H 'Content-type: application/json' \
-                            --data '{"chat_id": "486108633", "text": "${telegramMessage}" }' \
-                            https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
-                        """
-                    }
+                // Получаем информацию о проекте из SonarCloud
+                def sonarProjectKey = "your-project-key" // Замените на ваш project key
+                def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
+
+                def telegramMessage = "Сборка завершена успешно! ✅\n" +
+                    "SonarCloud отчет: ${sonarUrl}\n" +
+                    "Проверьте качество кода в SonarCloud"
+
+                sh """
+                    curl -X POST -H 'Content-type: application/json' \
+                    --data '{"chat_id": "486108633", "text": "${telegramMessage}" }' \
+                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                """
+            }
             echo 'Build completed successfully!'
         }
         failure {
             script {
-                        // Опционально: отправка при неудачной сборке
-                        def telegramMessage = "Сборка провалилась! ❌"
-                        sh """
-                            curl -X POST -H 'Content-type: application/json' \
-                            --data '{"chat_id": "486108633", "text": "${telegramMessage}" }' \
-                            https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
-                        """
-                    }
+                def telegramMessage = "Сборка провалилась! ❌\n" +
+                    "Проверьте отчеты в Jenkins и SonarCloud для деталей."
+
+                sh """
+                    curl -X POST -H 'Content-type: application/json' \
+                    --data '{"chat_id": "486108633", "text": "${telegramMessage}" }' \
+                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                """
+            }
             echo 'Build failed!'
         }
     }
-
 }
