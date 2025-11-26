@@ -72,11 +72,11 @@ pipeline {
                     sh 'mvn clean package'
                 }
             }
-            post {
-                always {
-                    junit 'recognition-result-service/target/surefire-reports/*.xml'
-                }
-            }
+//             post {
+//                 always {
+//                     junit 'recognition-result-service/target/surefire-reports/*.xml'
+//                 }
+//             }
         }
 
         stage('Save Artifacts') {
