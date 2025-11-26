@@ -168,7 +168,7 @@ pipeline {
         success {
             script {
                 // Получаем информацию о проекте из SonarCloud
-                def sonarProjectKey = "your-project-key" // Замените на ваш project key
+                def sonarProjectKey = "recognition" // Замените на ваш project key
                 def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
 
                 def telegramMessage = "Сборка завершена успешно! ✅\n" +
