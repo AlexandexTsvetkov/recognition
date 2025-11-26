@@ -77,11 +77,11 @@ pipeline {
             steps {
                 script {
                     // Анализ кода с помощью SonarCloud
-                    withSonarQubeEnv('SonarCloud') { // Настроить SonarCloud в Jenkins
+                    withSonarQubeEnv('SonarCloud') {
                         sh """
                             mvn sonar:sonar \
-                            -Dsonar.projectKey=recognition \  // Замените на ваш project key из SonarCloud
-                            -Dsonar.organization=AlexandexTsvetkov \  // Замените на вашу организацию
+                            -Dsonar.projectKey=AlexandexTsvetkov_recognition \
+                            -Dsonar.organization=alexandextsvetkov \
                             -Dsonar.host.url=https://sonarcloud.io \
                             -Dsonar.login=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
@@ -167,17 +167,14 @@ pipeline {
         }
         success {
             script {
-                // Получаем информацию о проекте из SonarCloud
-                def sonarProjectKey = "recognition" // Замените на ваш project key
+                def sonarProjectKey = "AlexandexTsvetkov_recognition"
                 def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
 
-                def telegramMessage = "Сборка завершена успешно! ✅\n" +
-                    "SonarCloud отчет: ${sonarUrl}\n" +
-                    "Проверьте качество кода в SonarCloud"
+                def telegramMessage = "Сборка завершена успешно! ✅\\nSonarCloud отчет: ${sonarUrl}\\nПроверьте качество кода в SonarCloud"
 
                 sh """
                     curl -X POST -H 'Content-type: application/json' \
-                    --data '{"chat_id": "486108633", "text": "${telegramMessage}" }' \
+                    --data '{"chat_id": "486108633", "text": "${telegramMessage}"}' \
                     https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                 """
             }
@@ -185,12 +182,11 @@ pipeline {
         }
         failure {
             script {
-                def telegramMessage = "Сборка провалилась! ❌\n" +
-                    "Проверьте отчеты в Jenkins и SonarCloud для деталей."
+                def telegramMessage = "Сборка провалилась! ❌\\nПроверьте отчеты в Jenkins и SonarCloud для деталей."
 
                 sh """
                     curl -X POST -H 'Content-type: application/json' \
-                    --data '{"chat_id": "486108633", "text": "${telegramMessage}" }' \
+                    --data '{"chat_id": "486108633", "text": "${telegramMessage}"}' \
                     https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                 """
             }
