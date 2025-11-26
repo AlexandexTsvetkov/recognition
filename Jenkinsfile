@@ -95,10 +95,29 @@ pipeline {
             junit '**/target/surefire-reports/*.xml'
         }
         success {
+            script {
+                        // Отправка в Telegram при успешной сборке
+                        def telegramMessage = "Саня собрал приложение. ✅"
+                        sh """
+                            curl -X POST -H 'Content-type: application/json' \
+                            --data '{"chat_id": "486108633", "text": "${telegramMessage}" }' \
+                            https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                        """
+                    }
             echo 'Build completed successfully!'
         }
         failure {
+            script {
+                        // Опционально: отправка при неудачной сборке
+                        def telegramMessage = "Сборка провалилась! ❌"
+                        sh """
+                            curl -X POST -H 'Content-type: application/json' \
+                            --data '{"chat_id": "486108633", "text": "${telegramMessage}" }' \
+                            https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                        """
+                    }
             echo 'Build failed!'
         }
     }
+
 }
