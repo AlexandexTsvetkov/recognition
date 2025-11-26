@@ -35,7 +35,7 @@ pipeline {
             }
             post {
                 always {
-                    junit 'recognition-api-gateway/target/surefire-reports/**/*.xml'
+                    junit 'recognition-api-gateway/target/surefire-reports/*.xml'
                 }
             }
         }
@@ -48,7 +48,7 @@ pipeline {
             }
             post {
                 always {
-                    junit 'recognition-request-service/target/surefire-reports/**/*.xml'
+                    junit 'recognition-request-service/target/surefire-reports/*.xml'
                 }
             }
         }
@@ -61,7 +61,7 @@ pipeline {
             }
             post {
                 always {
-                    junit 'recognition-processing-service/target/surefire-reports/**/*.xml'
+                    junit 'recognition-processing-service/target/surefire-reports/*.xml'
                 }
             }
         }
@@ -74,7 +74,7 @@ pipeline {
             }
             post {
                 always {
-                    junit 'recognition-result-service/target/surefire-reports/**/*.xml'
+                    junit 'recognition-result-service/target/surefire-reports/*.xml'
                 }
             }
         }
@@ -92,7 +92,7 @@ pipeline {
     post {
         always {
             // Замените publishTestResults на junit для всех модулей
-            junit '**/target/surefire-reports/**/*.xml'
+            junit '**/target/surefire-reports/*.xml'
         }
         success {
             echo 'Build completed successfully!'
