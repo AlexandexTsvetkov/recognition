@@ -26,27 +26,29 @@ pipeline {
                     echo "Используем Maven: ${env.MAVEN_HOME}"
                     echo "Используем Java: ${env.JAVA_HOME}"
 
-                    // Для multi-module проекта нужно использовать правильную фазу
-                    // 'install' или 'package' сгенерирует отчеты JaCoCo
-                    sh 'mvn clean install -DskipTests=false'
+                    // Сборка и тесты
+                    sh 'mvn clean test'
 
-                    // Дополнительно: агрегированный отчет
+                    // Агрегированный отчет JaCoCo
                     sh 'mvn jacoco:report-aggregate'
+
+                    // Пакетирование
+                    sh 'mvn package -DskipTests'
                 }
             }
             post {
                 always {
-                    // Тестовые отчеты из всех модулей
+                    // Тестовые отчеты
                     junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
 
-                    // Агрегированный отчет JaCoCo будет в target/site/jacoco-aggregate/
+                    // Отчет JaCoCo
                     publishHTML([
-                        allowMissing: true,
+                        allowMissing: false,
                         alwaysLinkToLastBuild: true,
                         keepAll: true,
                         reportDir: 'target/site/jacoco-aggregate',
                         reportFiles: 'index.html',
-                        reportName: 'JaCoCo Code Coverage (Aggregated)'
+                        reportName: 'JaCoCo Code Coverage'
                     ])
                 }
             }
@@ -59,18 +61,28 @@ pipeline {
 
                     // Для SonarCloud с multi-module проектом
                     withSonarQubeEnv('SonarCloud') {
-                        sh """
+                        // Важно: используем одинарные кавычки и экранирование
+                        sh '''
                             mvn sonar:sonar \
-                            -Dsonar.projectKey=recognition \
-                            -Dsonar.organization=AlexandexTsvetkov \
+                            -Dsonar.projectKey=AlexandexTsvetkov_recognition \
+                            -Dsonar.organization=alexandextsvetkov \
                             -Dsonar.host.url=https://sonarcloud.io \
-                            -Dsonar.login=${SONAR_CLOUD_TOKEN} \
-                            -Dsonar.coverage.jacoco.xmlReportPaths=**/target/site/jacoco/jacoco.xml \
-                            -Dsonar.java.binaries=**/target/classes \
-                            -Dsonar.sourceEncoding=UTF-8 \
-                            -Dsonar.scm.disabled=true \
-                            -Dsonar.verbose=true
-                        """
+                            -Dsonar.login=''' + "${SONAR_CLOUD_TOKEN}" + ''' \
+                            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+                            -Dsonar.java.binaries=target/classes \
+                            -Dsonar.sourceEncoding=UTF-8
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('SonarCloud Quality Gate') {
+            steps {
+                script {
+                    // Ожидание и проверка Quality Gate
+                    timeout(time: 10, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: false
                     }
                 }
             }
