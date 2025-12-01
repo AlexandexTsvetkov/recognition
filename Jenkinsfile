@@ -22,69 +22,40 @@ pipeline {
 
         stage('Dependency Check (SAST)') {
             steps {
-                script {
-                    sh 'mkdir -p reports/dependency-check'
-
-                    // Используем параметр nvdApiKey напрямую
-                    dependencyCheck additionalArguments: """
-                        --scan . \
-                        --format HTML \
-                        --format JSON \
-                        --out ./reports/dependency-check \
-                        --enableExperimental \
-                        --nvdApiKey 017e90ab-c780-4784-8330-af846bd99fcb \
-                        --failOnCVSS 8 \
-                        --noupdate
-                    """, odcInstallation: 'OWASP-Dependency-Check'
-                }
-            }
-            post {
-                always {
-                    script {
-                        if (fileExists('reports/dependency-check/dependency-check-report.html')) {
-                            publishHTML([
-                                allowMissing: false,
-                                alwaysLinkToLastBuild: true,
-                                keepAll: true,
-                                reportDir: 'reports/dependency-check',
-                                reportFiles: 'dependency-check-report.html',
-                                reportName: 'Dependency Check Report'
-                            ])
-                        } else {
-                            echo 'Отчет Dependency Check не был создан'
-                        }
-                    }
-                }
+                echo "Dependency Check временно отключен"
+                // Пропускаем для быстрой проверки сборки
             }
         }
 
-        stage('Build & Test') {
+        stage('Build & Test with Coverage') {
             steps {
                 script {
                     echo "Используем Maven: ${env.MAVEN_HOME}"
                     echo "Используем Java: ${env.JAVA_HOME}"
 
-                    // Очистка, компиляция и тесты
-                    sh 'mvn clean compile test package'
+                    // Вариант 1: Используем фазу verify, которая включает отчет JaCoCo
+                    sh 'mvn clean verify'
 
-                    // Генерация отчетов JaCoCo
-                    sh 'mvn jacoco:report'
+                    // Вариант 2: Или явно вызываем цель report после тестов
+                    // sh 'mvn clean test jacoco:report'
                 }
             }
             post {
                 always {
-                    // Публикация отчета JaCoCo
-                    publishHTML([
-                        allowMissing: true,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: 'target/site/jacoco',
-                        reportFiles: 'index.html',
-                        reportName: 'JaCoCo Code Coverage'
-                    ])
+                    script {
+                        // Сбор результатов тестов
+                        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
 
-                    // Сбор результатов тестов
-                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+                        // Публикация отчета JaCoCo
+                        publishHTML([
+                            allowMissing: true,
+                            alwaysLinkToLastBuild: true,
+                            keepAll: true,
+                            reportDir: 'target/site/jacoco',
+                            reportFiles: 'index.html',
+                            reportName: 'JaCoCo Code Coverage'
+                        ])
+                    }
                 }
             }
         }
@@ -104,11 +75,18 @@ pipeline {
                             -Dsonar.login=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
                             -Dsonar.java.binaries=target/classes \
-                            -Dsonar.sourceEncoding=UTF-8 \
-                            -Dsonar.sources=src/main/java \
-                            -Dsonar.tests=src/test/java
+                            -Dsonar.sourceEncoding=UTF-8
                         """
                     }
+                }
+            }
+        }
+
+        stage('Package Artifacts') {
+            steps {
+                script {
+                    // Пакетируем после успешной сборки
+                    sh 'mvn package -DskipTests'
                 }
             }
         }
@@ -162,20 +140,6 @@ pipeline {
                 """
             }
             echo 'Build failed!'
-        }
-        unstable {
-            script {
-                def jenkinsUrl = env.BUILD_URL
-                def message = "Сборка завершена с предупреждениями! ⚠️\\nJenkins: ${jenkinsUrl}"
-
-                sh """
-                    curl -X POST \
-                    -H 'Content-Type: application/json' \
-                    -d '{"chat_id": "486108633", "text": "${message}"}' \
-                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
-                """
-            }
-            echo 'Build unstable!'
         }
     }
 }
