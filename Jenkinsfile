@@ -25,22 +25,25 @@ pipeline {
         stage('Dependency Check (SAST)') {
             steps {
                 script {
-                    // Сканирование зависимостей на уязвимости
-                    dependencyCheck arguments: '''
+                    // Создаем директорию для отчетов
+                    sh 'mkdir -p reports/dependency-check'
+
+                    // Запускаем Dependency Check
+                    dependencyCheck additionalArguments: '''
                         --scan .
                         --format HTML
                         --format JSON
                         --out ./reports/dependency-check
                         --enableExperimental
                     ''', odcInstallation: 'OWASP-Dependency-Check'
-
-                    // Публикация результатов
-                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
                 }
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'reports/dependency-check/*.html', fingerprint: false
+                    // Сохраняем HTML отчет
+                    archiveArtifacts artifacts: 'reports/dependency-check/dependency-check-report.html', fingerprint: false
+
+                    // Публикуем HTML отчет
                     publishHTML([
                         allowMissing: false,
                         alwaysLinkToLastBuild: true,
@@ -55,9 +58,16 @@ pipeline {
 
         stage('Build & Code Coverage') {
             steps {
-                sh 'mvn clean install -DskipTests'
-                // Подготавливаем JaCoCo для сбора покрытия
-                sh 'mvn jacoco:prepare-agent test jacoco:report'
+                script {
+                    // Устанавливаем переменные окружения для инструментов
+                    withEnv(["PATH+MAVEN=${tool 'Maven-3.8.1'}/bin:${env.PATH}",
+                             "JAVA_HOME=${tool 'JDK21'}"]) {
+
+                        sh 'mvn clean install -DskipTests'
+                        // Подготавливаем JaCoCo для сбора покрытия
+                        sh 'mvn jacoco:prepare-agent test jacoco:report'
+                    }
+                }
             }
             post {
                 always {
@@ -76,20 +86,24 @@ pipeline {
         stage('SonarCloud Analysis') {
             steps {
                 script {
-                    // Анализ кода с помощью SonarCloud
-                    withSonarQubeEnv('SonarCloud') {
-                        sh """
-                            mvn sonar:sonar \
-                            -Dsonar.projectKey=AlexandexTsvetkov_recognition \
-                            -Dsonar.organization=alexandextsvetkov \
-                            -Dsonar.host.url=https://sonarcloud.io \
-                            -Dsonar.login=${SONAR_CLOUD_TOKEN} \
-                            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
-                            -Dsonar.java.binaries=target/classes \
-                            -Dsonar.sourceEncoding=UTF-8 \
-                            -Dsonar.sources=src/main/java \
-                            -Dsonar.tests=src/test/java
-                        """
+                    withEnv(["PATH+MAVEN=${tool 'Maven-3.8.1'}/bin:${env.PATH}",
+                             "JAVA_HOME=${tool 'JDK21'}"]) {
+
+                        // Анализ кода с помощью SonarCloud
+                        withSonarQubeEnv('SonarCloud') {
+                            sh """
+                                mvn sonar:sonar \
+                                -Dsonar.projectKey=AlexandexTsvetkov_recognition \
+                                -Dsonar.organization=alexandextsvetkov \
+                                -Dsonar.host.url=https://sonarcloud.io \
+                                -Dsonar.login=${SONAR_CLOUD_TOKEN} \
+                                -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+                                -Dsonar.java.binaries=target/classes \
+                                -Dsonar.sourceEncoding=UTF-8 \
+                                -Dsonar.sources=src/main/java \
+                                -Dsonar.tests=src/test/java
+                            """
+                        }
                     }
                 }
             }
@@ -99,8 +113,13 @@ pipeline {
             parallel {
                 stage('API Gateway') {
                     steps {
-                        dir('recognition-api-gateway') {
-                            sh 'mvn clean package'
+                        script {
+                            withEnv(["PATH+MAVEN=${tool 'Maven-3.8.1'}/bin:${env.PATH}",
+                                     "JAVA_HOME=${tool 'JDK21'}"]) {
+                                dir('recognition-api-gateway') {
+                                    sh 'mvn clean package'
+                                }
+                            }
                         }
                     }
                     post {
@@ -111,8 +130,13 @@ pipeline {
                 }
                 stage('Request Service') {
                     steps {
-                        dir('recognition-request-service') {
-                            sh 'mvn clean package'
+                        script {
+                            withEnv(["PATH+MAVEN=${tool 'Maven-3.8.1'}/bin:${env.PATH}",
+                                     "JAVA_HOME=${tool 'JDK21'}"]) {
+                                dir('recognition-request-service') {
+                                    sh 'mvn clean package'
+                                }
+                            }
                         }
                     }
                     post {
@@ -123,8 +147,13 @@ pipeline {
                 }
                 stage('Processing Service') {
                     steps {
-                        dir('recognition-processing-service') {
-                            sh 'mvn clean package'
+                        script {
+                            withEnv(["PATH+MAVEN=${tool 'Maven-3.8.1'}/bin:${env.PATH}",
+                                     "JAVA_HOME=${tool 'JDK21'}"]) {
+                                dir('recognition-processing-service') {
+                                    sh 'mvn clean package'
+                                }
+                            }
                         }
                     }
                     post {
@@ -135,8 +164,18 @@ pipeline {
                 }
                 stage('Result Service') {
                     steps {
-                        dir('recognition-result-service') {
-                            sh 'mvn clean package'
+                        script {
+                            withEnv(["PATH+MAVEN=${tool 'Maven-3.8.1'}/bin:${env.PATH}",
+                                     "JAVA_HOME=${tool 'JDK21'}"]) {
+                                dir('recognition-result-service') {
+                                    sh 'mvn clean package'
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'recognition-result-service/target/surefire-reports/*.xml'
                         }
                     }
                 }
@@ -170,10 +209,11 @@ pipeline {
                 def sonarProjectKey = "AlexandexTsvetkov_recognition"
                 def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
 
-                def telegramMessage = "Сборка завершена успешно! ✅\\nSonarCloud отчет: ${sonarUrl}\\nПроверьте качество кода в SonarCloud"
+                // Экранируем специальные символы для JSON
+                def telegramMessage = 'Сборка завершена успешно! ✅\nSonarCloud отчет: ' + sonarUrl + '\nПроверьте качество кода в SonarCloud'
 
                 sh """
-                    curl -X POST -H 'Content-type: application/json' \
+                    curl -s -X POST -H 'Content-type: application/json' \
                     --data '{"chat_id": "486108633", "text": "${telegramMessage}"}' \
                     https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                 """
@@ -182,10 +222,10 @@ pipeline {
         }
         failure {
             script {
-                def telegramMessage = "Сборка провалилась! ❌\\nПроверьте отчеты в Jenkins и SonarCloud для деталей."
+                def telegramMessage = 'Сборка провалилась! ❌\nПроверьте отчеты в Jenkins и SonarCloud для деталей.'
 
                 sh """
-                    curl -X POST -H 'Content-type: application/json' \
+                    curl -s -X POST -H 'Content-type: application/json' \
                     --data '{"chat_id": "486108633", "text": "${telegramMessage}"}' \
                     https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                 """
