@@ -20,42 +20,34 @@ pipeline {
             }
         }
 
-        stage('Dependency Check (SAST)') {
-            steps {
-                echo "Dependency Check временно отключен"
-                // Пропускаем для быстрой проверки сборки
-            }
-        }
-
-        stage('Build & Test with Coverage') {
+        stage('Build & Test with JaCoCo') {
             steps {
                 script {
                     echo "Используем Maven: ${env.MAVEN_HOME}"
                     echo "Используем Java: ${env.JAVA_HOME}"
 
-                    // Вариант 1: Используем фазу verify, которая включает отчет JaCoCo
-                    sh 'mvn clean verify'
+                    // Для multi-module проекта нужно использовать правильную фазу
+                    // 'install' или 'package' сгенерирует отчеты JaCoCo
+                    sh 'mvn clean install -DskipTests=false'
 
-                    // Вариант 2: Или явно вызываем цель report после тестов
-                    // sh 'mvn clean test jacoco:report'
+                    // Дополнительно: агрегированный отчет
+                    sh 'mvn jacoco:report-aggregate'
                 }
             }
             post {
                 always {
-                    script {
-                        // Сбор результатов тестов
-                        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+                    // Тестовые отчеты из всех модулей
+                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
 
-                        // Публикация отчета JaCoCo
-                        publishHTML([
-                            allowMissing: true,
-                            alwaysLinkToLastBuild: true,
-                            keepAll: true,
-                            reportDir: 'target/site/jacoco',
-                            reportFiles: 'index.html',
-                            reportName: 'JaCoCo Code Coverage'
-                        ])
-                    }
+                    // Агрегированный отчет JaCoCo будет в target/site/jacoco-aggregate/
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'target/site/jacoco-aggregate',
+                        reportFiles: 'index.html',
+                        reportName: 'JaCoCo Code Coverage (Aggregated)'
+                    ])
                 }
             }
         }
@@ -65,7 +57,7 @@ pipeline {
                 script {
                     echo "Запуск анализа SonarCloud..."
 
-                    // Анализ кода с помощью SonarCloud
+                    // Для SonarCloud с multi-module проектом
                     withSonarQubeEnv('SonarCloud') {
                         sh """
                             mvn sonar:sonar \
@@ -73,30 +65,12 @@ pipeline {
                             -Dsonar.organization=alexandextsvetkov \
                             -Dsonar.host.url=https://sonarcloud.io \
                             -Dsonar.login=${SONAR_CLOUD_TOKEN} \
-                            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
-                            -Dsonar.java.binaries=target/classes \
-                            -Dsonar.sourceEncoding=UTF-8
+                            -Dsonar.coverage.jacoco.xmlReportPaths=**/target/site/jacoco/jacoco.xml \
+                            -Dsonar.java.binaries=**/target/classes \
+                            -Dsonar.sourceEncoding=UTF-8 \
+                            -Dsonar.scm.disabled=true \
+                            -Dsonar.verbose=true
                         """
-                    }
-                }
-            }
-        }
-
-        stage('Package Artifacts') {
-            steps {
-                script {
-                    // Пакетируем после успешной сборки
-                    sh 'mvn package -DskipTests'
-                }
-            }
-        }
-
-        stage('SonarCloud Quality Gate') {
-            steps {
-                script {
-                    // Ожидание и проверка Quality Gate
-                    timeout(time: 10, unit: 'MINUTES') {
-                        waitForQualityGate abortPipeline: false
                     }
                 }
             }
