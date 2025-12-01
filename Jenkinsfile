@@ -66,7 +66,7 @@ pipeline {
                         sh """
                             mvn sonar:sonar \
                             -Dsonar.projectKey=AlexandexTsvetkov_recognition \
-                            -Dsonar.organization=AlexandexTsvetkov \
+                            -Dsonar.organization=alexandextsvetkov \
                             -Dsonar.host.url=https://sonarcloud.io \
                             -Dsonar.token=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
