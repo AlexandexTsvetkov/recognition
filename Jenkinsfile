@@ -150,6 +150,7 @@ pipeline {
         always {
             // Очистка workspace (опционально)
             // cleanWs()
+            echo "Pipeline завершен с результатом: ${currentBuild.result}"
         }
         success {
             script {
