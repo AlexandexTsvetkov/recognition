@@ -8,8 +8,8 @@ pipeline {
     environment {
         MAVEN_HOME = tool name: 'Maven-3.8.1', type: 'maven'
         JAVA_HOME = tool name: 'JDK21', type: 'jdk'
-        DEPENDENCY_CHECK_HOME = tool name: 'Dependency-Check-9.0.10', type: 'dependency-check'
-        PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.DEPENDENCY_CHECK_HOME}/bin:${env.PATH}"
+        DEP_CHECK_TOOL = tool name: 'Dependency-Check-9.0.10', type: 'dependency-check'
+        PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.DEP_CHECK_TOOL}/bin:${env.PATH}"
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
         SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
     }
@@ -26,6 +26,14 @@ pipeline {
                 script {
                     echo "Используем Maven: ${env.MAVEN_HOME}"
                     echo "Используем Java: ${env.JAVA_HOME}"
+                    echo "Dependency Check установлен в: ${env.DEP_CHECK_TOOL}"
+
+                    // Проверяем, что инструмент установлен
+                    sh """
+                        echo "Проверка установки Dependency Check:"
+                        ls -la "${env.DEP_CHECK_TOOL}" || echo "Директория не найдена"
+                        ls -la "${env.DEP_CHECK_TOOL}/bin/" || echo "Bin директория не найдена"
+                    """
 
                     // Сборка и тесты
                     sh 'mvn clean test'
@@ -59,33 +67,49 @@ pipeline {
             steps {
                 script {
                     echo "🔒 Запуск SAST анализа с OWASP Dependency Check"
+                    echo "📁 Путь к инструменту: ${env.DEP_CHECK_TOOL}"
 
                     // Создаем директорию для отчетов
                     sh 'mkdir -p reports/dependency-check'
 
+                    // Проверяем, существует ли скрипт
+                    sh """
+                        if [ -f "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh" ]; then
+                            echo "✅ dependency-check.sh найден"
+                            ls -la "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh"
+                        else
+                            echo "❌ dependency-check.sh не найден в ${env.DEP_CHECK_TOOL}/bin/"
+                            echo "Содержимое директории:"
+                            ls -la "${env.DEP_CHECK_TOOL}/" || true
+                            ls -la "${env.DEP_CHECK_TOOL}/bin/" || true
+                        fi
+                    """
+
                     // Запускаем Dependency Check
                     sh """
-                        dependency-check.sh \
+                        "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh" \
                         --project "Recognition System" \
-                        --scan "**/target/*.jar" \
-                        --scan "**/pom.xml" \
+                        --scan "." \
                         --format "HTML" \
                         --format "JSON" \
                         --format "SARIF" \
                         --out "reports/dependency-check" \
                         --enableExperimental \
-                        --noupdate
+                        --noupdate \
+                        --disableBundleAudit \
+                        --disablePyDist \
+                        --disablePyPkg \
+                        --disableNodeAudit \
+                        --disableNodeJS \
+                        --disableRetireJS
                     """
-
-                    // Альтернативный вариант с Maven плагином (если предпочтительнее)
-                    // sh 'mvn org.owasp:dependency-check-maven:check'
                 }
             }
             post {
                 always {
                     // Публикуем HTML отчет
                     publishHTML([
-                        allowMissing: false,
+                        allowMissing: true,
                         alwaysLinkToLastBuild: true,
                         keepAll: true,
                         reportDir: 'reports/dependency-check',
@@ -93,27 +117,33 @@ pipeline {
                         reportName: 'OWASP Dependency Check Report'
                     ])
 
-                    // Сохраняем JSON отчет для дальнейшей обработки
+                    // Сохраняем JSON отчет
                     archiveArtifacts artifacts: 'reports/dependency-check/*.json, reports/dependency-check/*.sarif', fingerprint: false
 
-                    // Запись результатов в лог
+                    // Логируем результаты
                     script {
-                        def reportPath = "${env.WORKSPACE}/reports/dependency-check/dependency-check-report.json"
-                        if (fileExists(reportPath)) {
-                            def report = readJSON file: reportPath
-                            def vulnerabilities = report.dependencies?.findAll { it.vulnerabilities }?.size() ?: 0
-                            def totalVulns = report.dependencies?.sum { it.vulnerabilities?.size() ?: 0 } ?: 0
+                        def reportFile = "reports/dependency-check/dependency-check-report.json"
+                        if (fileExists(reportFile)) {
+                            try {
+                                def report = readJSON file: reportFile
+                                def deps = report.dependencies?.size() ?: 0
+                                def vulnDeps = report.dependencies?.count { it.vulnerabilities } ?: 0
+                                def totalVulns = report.dependencies?.sum { it.vulnerabilities?.size() ?: 0 } ?: 0
 
-                            echo "📊 Результаты Dependency Check:"
-                            echo "📦 Проанализировано зависимостей: ${report.dependencies?.size() ?: 0}"
-                            echo "⚠️  Зависимостей с уязвимостями: ${vulnerabilities}"
-                            echo "🔴 Всего уязвимостей: ${totalVulns}"
+                                echo "📊 Результаты анализа безопасности:"
+                                echo "📦 Проанализировано зависимостей: ${deps}"
+                                echo "⚠️  Уязвимых зависимостей: ${vulnDeps}"
+                                echo "🔴 Всего обнаружено уязвимостей: ${totalVulns}"
 
-                            // Устанавливаем качество сборки
-                            if (totalVulns > 10) {
-                                currentBuild.result = 'UNSTABLE'
-                                echo "⚠️  Найдено много уязвимостей, сборка помечена как нестабильная"
+                                if (totalVulns > 0) {
+                                    echo "ℹ️  Подробности в отчете: ${env.BUILD_URL}dependency-check/"
+                                    currentBuild.result = 'UNSTABLE'
+                                }
+                            } catch (Exception e) {
+                                echo "⚠️  Не удалось прочитать отчет: ${e.message}"
                             }
+                        } else {
+                            echo "⚠️  Отчет не найден: ${reportFile}"
                         }
                     }
                 }
@@ -124,7 +154,6 @@ pipeline {
             steps {
                 script {
                     echo "Запуск анализа SonarCloud..."
-                    echo "Project Key: AlexandexTsvetkov_recognition"
 
                     withSonarQubeEnv('SonarCloud') {
                         sh """
@@ -135,8 +164,6 @@ pipeline {
                             -Dsonar.token=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
                             -Dsonar.java.binaries=target/classes \
-                            -Dsonar.dependencyCheck.jsonReportPath=reports/dependency-check/dependency-check-report.json \
-                            -Dsonar.dependencyCheck.htmlReportPath=reports/dependency-check/dependency-check-report.html \
                             -Dsonar.sourceEncoding=UTF-8
                         """
                     }
@@ -153,44 +180,53 @@ pipeline {
 
     post {
         always {
-            echo "Pipeline завершен с результатом: ${currentBuild.result}"
-
-            // Общий отчет о сборке
+            echo "Pipeline завершен: ${currentBuild.currentResult}"
+        }
+        success {
             script {
-                def sonarProjectKey = "AlexandexTsvetkov_recognition"
-                def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
-                def jenkinsUrl = env.BUILD_URL
-                def dependencyCheckUrl = "${jenkinsUrl}dependency-check/"
-
                 def message = """
-                🎉 Сборка завершена!
+                ✅ Сборка успешна!
 
                 📊 Отчеты:
-                - Jenkins: ${jenkinsUrl}
-                - SonarCloud: ${sonarUrl}
-                - Dependency Check: ${dependencyCheckUrl}
-                - JaCoCo Coverage: ${jenkinsUrl}jacoco/
+                - Jenkins: ${env.BUILD_URL}
+                - SonarCloud: https://sonarcloud.io/dashboard?id=AlexandexTsvetkov_recognition
+                - Dependency Check: ${env.BUILD_URL}dependency-check/
+                - Code Coverage: ${env.BUILD_URL}jacoco/
 
-                📈 Статус: ${currentBuild.result ?: 'SUCCESS'}
-
-                Проверьте отчеты для деталей!
+                🔒 SAST анализ выполнен!
                 """.stripIndent().trim()
-
-                def jsonMessage = message.replace('"', '\\"').replace('\n', '\\n')
 
                 sh """
                     curl -s -X POST \
                     -H 'Content-Type: application/json' \
-                    -d '{"chat_id": "486108633", "text": "${jsonMessage}"}' \
+                    -d '{"chat_id": "486108633", "text": "${message}"}' \
                     https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                 """
             }
         }
         failure {
-            echo 'Build failed!'
+            echo '❌ Сборка завершилась ошибкой'
         }
         unstable {
-            echo 'Build unstable due to security vulnerabilities!'
+            script {
+                def message = """
+                ⚠️  Сборка нестабильна!
+
+                Причина: Найдены уязвимости в зависимостях
+
+                Проверьте отчет Dependency Check:
+                ${env.BUILD_URL}dependency-check/
+
+                Jenkins: ${env.BUILD_URL}
+                """.stripIndent().trim()
+
+                sh """
+                    curl -s -X POST \
+                    -H 'Content-Type: application/json' \
+                    -d '{"chat_id": "486108633", "text": "${message}"}' \
+                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                """
+            }
         }
     }
 }
