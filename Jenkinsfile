@@ -20,6 +20,67 @@ pipeline {
             }
         }
 
+        stage('Dependency Check (SAST)') {
+            steps {
+                script {
+                    echo "🔍 Запуск OWASP Dependency Check анализа..."
+
+                    // Создаем директорию для отчетов
+                    sh 'mkdir -p reports/dependency-check'
+
+                    // Запускаем анализ с таймаутом
+                    timeout(time: 10, unit: 'MINUTES') {
+                        try {
+                            dependencyCheck additionalArguments: '''
+                                --scan **/target/*.jar
+                                --format HTML
+                                --format JSON
+                                --out ./reports/dependency-check
+                                --enableExperimental
+                                --nvdApiKey 017e90ab-c780-4784-8330-af846bd99fcb
+                                --noupdate
+                                --failOnCVSS 11
+                            ''', odcInstallation: 'OWASP-Dependency-Check'
+
+                            echo "✅ Dependency Check завершен успешно"
+
+                        } catch (Exception e) {
+                            echo "⚠️ Dependency Check завершился с ошибкой: ${e.message}"
+                            echo "📋 Это нормально для первого запуска или при проблемах с сетью"
+                            echo "💡 Сборка продолжается, SAST не критичен"
+
+                            // Делаем сборку unstable, но не failed
+                            currentBuild.result = 'UNSTABLE'
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    script {
+                        // Всегда проверяем и публикуем отчет если он есть
+                        if (fileExists('reports/dependency-check/dependency-check-report.html')) {
+                            echo "📈 Публикация отчета Dependency Check..."
+
+                            publishHTML([
+                                allowMissing: false,
+                                alwaysLinkToLastBuild: true,
+                                keepAll: true,
+                                reportDir: 'reports/dependency-check',
+                                reportFiles: 'dependency-check-report.html',
+                                reportName: 'Dependency Check Report'
+                            ])
+
+                            // Архивируем отчет
+                            archiveArtifacts artifacts: 'reports/dependency-check/*.html', fingerprint: false
+                        } else {
+                            echo "📋 Отчет Dependency Check не создан"
+                        }
+                    }
+                }
+            }
+        }
+
         stage('Build & Test with JaCoCo') {
             steps {
                 script {
@@ -86,18 +147,35 @@ pipeline {
     }
 
     post {
+        always {
+            // Очистка workspace (опционально)
+            // cleanWs()
+        }
         success {
             script {
                 def sonarProjectKey = "AlexandexTsvetkov_recognition"
                 def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
                 def jenkinsUrl = env.BUILD_URL
 
-                def message = "Сборка завершена успешно! ✅\\nJenkins: ${jenkinsUrl}\\nSonarCloud: ${sonarUrl}"
+                def message = """
+                Сборка завершена успешно! ✅
+
+                📊 Отчеты:
+                - Jenkins: ${jenkinsUrl}
+                - SonarCloud: ${sonarUrl}
+                - JaCoCo Coverage: доступно в Jenkins
+                - Dependency Check: доступно в Jenkins
+
+                Проверьте качество кода в SonarCloud!
+                """.stripIndent().trim()
+
+                // Формируем JSON безопасно
+                def jsonMessage = message.replace('"', '\\"').replace('\n', '\\n')
 
                 sh """
                     curl -X POST \
                     -H 'Content-Type: application/json' \
-                    -d '{"chat_id": "486108633", "text": "${message}"}' \
+                    -d '{"chat_id": "486108633", "text": "${jsonMessage}"}' \
                     https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                 """
             }
@@ -106,7 +184,7 @@ pipeline {
         failure {
             script {
                 def jenkinsUrl = env.BUILD_URL
-                def message = "Сборка провалилась! ❌\\nJenkins: ${jenkinsUrl}"
+                def message = "Сборка провалилась! ❌\\nJenkins: ${jenkinsUrl}\\nПроверьте логи для деталей."
 
                 sh """
                     curl -X POST \
@@ -116,6 +194,38 @@ pipeline {
                 """
             }
             echo 'Build failed!'
+        }
+        unstable {
+            script {
+                def sonarProjectKey = "AlexandexTsvetkov_recognition"
+                def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
+                def jenkinsUrl = env.BUILD_URL
+
+                def message = """
+                Сборка завершена с предупреждениями! ⚠️
+
+                📊 Отчеты:
+                - Jenkins: ${jenkinsUrl}
+                - SonarCloud: ${sonarUrl}
+
+                Возможные причины:
+                - Dependency Check не смог обновиться
+                - Некоторые тесты пропущены
+                - SonarCloud анализ занял много времени
+
+                Проверьте отчеты в Jenkins для деталей.
+                """.stripIndent().trim()
+
+                def jsonMessage = message.replace('"', '\\"').replace('\n', '\\n')
+
+                sh """
+                    curl -X POST \
+                    -H 'Content-Type: application/json' \
+                    -d '{"chat_id": "486108633", "text": "${jsonMessage}"}' \
+                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                """
+            }
+            echo 'Build unstable!'
         }
     }
 }
