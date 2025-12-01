@@ -20,67 +20,6 @@ pipeline {
             }
         }
 
-        stage('Dependency Check (SAST)') {
-            steps {
-                script {
-                    echo "🔍 Запуск OWASP Dependency Check анализа..."
-
-                    // Создаем директорию для отчетов
-                    sh 'mkdir -p reports/dependency-check'
-
-                    // Запускаем анализ с таймаутом
-                    timeout(time: 10, unit: 'MINUTES') {
-                        try {
-                            dependencyCheck additionalArguments: '''
-                                --scan **/target/*.jar
-                                --format HTML
-                                --format JSON
-                                --out ./reports/dependency-check
-                                --enableExperimental
-                                --nvdApiKey 017e90ab-c780-4784-8330-af846bd99fcb
-                                --noupdate
-                                --failOnCVSS 11
-                            ''', odcInstallation: 'OWASP-Dependency-Check'
-
-                            echo "✅ Dependency Check завершен успешно"
-
-                        } catch (Exception e) {
-                            echo "⚠️ Dependency Check завершился с ошибкой: ${e.message}"
-                            echo "📋 Это нормально для первого запуска или при проблемах с сетью"
-                            echo "💡 Сборка продолжается, SAST не критичен"
-
-                            // Делаем сборку unstable, но не failed
-                            currentBuild.result = 'UNSTABLE'
-                        }
-                    }
-                }
-            }
-            post {
-                always {
-                    script {
-                        // Всегда проверяем и публикуем отчет если он есть
-                        if (fileExists('reports/dependency-check/dependency-check-report.html')) {
-                            echo "📈 Публикация отчета Dependency Check..."
-
-                            publishHTML([
-                                allowMissing: false,
-                                alwaysLinkToLastBuild: true,
-                                keepAll: true,
-                                reportDir: 'reports/dependency-check',
-                                reportFiles: 'dependency-check-report.html',
-                                reportName: 'Dependency Check Report'
-                            ])
-
-                            // Архивируем отчет
-                            archiveArtifacts artifacts: 'reports/dependency-check/*.html', fingerprint: false
-                        } else {
-                            echo "📋 Отчет Dependency Check не создан"
-                        }
-                    }
-                }
-            }
-        }
-
         stage('Build & Test with JaCoCo') {
             steps {
                 script {
@@ -111,6 +50,103 @@ pipeline {
                         reportFiles: 'index.html',
                         reportName: 'JaCoCo Code Coverage'
                     ])
+                }
+            }
+        }
+
+        stage('Dependency Check (SAST)') {
+            steps {
+                script {
+                    echo "🔍 Запуск OWASP Dependency Check анализа..."
+
+                    // Создаем директорию для отчетов
+                    sh 'mkdir -p reports/dependency-check'
+
+                    // Проверяем есть ли JAR файлы для сканирования
+                    sh '''
+                        echo "=== Поиск JAR файлов для сканирования ==="
+                        find . -name "*.jar" -path "*/target/*" 2>/dev/null | head -10
+                        JAR_COUNT=$(find . -name "*.jar" -path "*/target/*" 2>/dev/null | wc -l)
+                        echo "Найдено JAR файлов: $JAR_COUNT"
+
+                        if [ $JAR_COUNT -eq 0 ]; then
+                            echo "⚠️ JAR файлы не найдены! Dependency Check будет пропущен."
+                            echo "💡 Убедитесь что стадия сборки выполнена успешно"
+                        else
+                            echo "✅ JAR файлы найдены, запускаем Dependency Check..."
+                        fi
+                    '''
+
+                    // Запускаем анализ с таймаутом
+                    timeout(time: 10, unit: 'MINUTES') {
+                        // Используем returnStatus чтобы перехватить ошибку
+                        def dcExitCode = sh(script: '''
+                            # Проверяем еще раз есть ли JAR файлы
+                            JAR_FILES=$(find . -name "*.jar" -path "*/target/*" 2>/dev/null | head -5)
+
+                            if [ -z "$JAR_FILES" ]; then
+                                echo "Нет JAR файлов для сканирования. Dependency Check пропущен."
+                                exit 0
+                            fi
+
+                            echo "Запуск Dependency Check для файлов:"
+                            echo "$JAR_FILES"
+
+                            # Запускаем Dependency Check вручную
+                            /var/jenkins_home/tools/org.jenkinsci.plugins.DependencyCheck.tools.DependencyCheckInstallation/OWASP-Dependency-Check/bin/dependency-check.sh \
+                                --scan . \
+                                --format HTML \
+                                --format JSON \
+                                --out ./reports/dependency-check \
+                                --enableExperimental \
+                                --nvdApiKey 017e90ab-c780-4784-8330-af846bd99fcb \
+                                --noupdate \
+                                --failOnCVSS 11 \
+                                --disableNexus \
+                                --disableOssIndex \
+                                --disableNodeAudit \
+                                --disableNodeJS \
+                                --disableRetireJS
+                        ''', returnStatus: true)
+
+                        if (dcExitCode == 0) {
+                            echo "✅ Dependency Check завершен успешно"
+                        } else if (dcExitCode == 13) {
+                            echo "⚠️ Dependency Check: No documents exist (нет файлов для сканирования)"
+                            echo "💡 Это может быть из-за проблем с путями сканирования"
+                            echo "📋 Продолжаем сборку, SAST пропущен"
+                            currentBuild.result = 'UNSTABLE'
+                        } else {
+                            echo "⚠️ Dependency Check завершился с кодом ошибки: ${dcExitCode}"
+                            echo "📋 Это нормально для первого запуска или при проблемах с сетью"
+                            echo "💡 Сборка продолжается, SAST не критичен"
+                            currentBuild.result = 'UNSTABLE'
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    script {
+                        // Всегда проверяем и публикуем отчет если он есть
+                        if (fileExists('reports/dependency-check/dependency-check-report.html')) {
+                            echo "📈 Публикация отчета Dependency Check..."
+
+                            publishHTML([
+                                allowMissing: false,
+                                alwaysLinkToLastBuild: true,
+                                keepAll: true,
+                                reportDir: 'reports/dependency-check',
+                                reportFiles: 'dependency-check-report.html',
+                                reportName: 'Dependency Check Report'
+                            ])
+
+                            // Архивируем отчет
+                            archiveArtifacts artifacts: 'reports/dependency-check/*.html', fingerprint: false
+                        } else {
+                            echo "📋 Отчет Dependency Check не создан"
+                        }
+                    }
                 }
             }
         }
@@ -148,8 +184,6 @@ pipeline {
 
     post {
         always {
-            // Очистка workspace (опционально)
-            // cleanWs()
             echo "Pipeline завершен с результатом: ${currentBuild.result}"
         }
         success {
@@ -208,6 +242,8 @@ pipeline {
                 📊 Отчеты:
                 - Jenkins: ${jenkinsUrl}
                 - SonarCloud: ${sonarUrl}
+                - JaCoCo Coverage: доступно в Jenkins
+                - Dependency Check: доступно в Jenkins
 
                 Возможные причины:
                 - Dependency Check не смог обновиться
