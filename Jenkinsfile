@@ -61,8 +61,8 @@ pipeline {
                     withSonarQubeEnv('SonarCloud') {
                         sh """
                             mvn sonar:sonar \
-                            -Dsonar.projectKey=AlexandexTsvetkov_recognition \
-                            -Dsonar.organization=alexandextsvetkov \
+                            -Dsonar.projectKey=recognition \
+                            -Dsonar.organization=AlexandexTsvetkov \
                             -Dsonar.host.url=https://sonarcloud.io \
                             -Dsonar.login=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=**/target/site/jacoco/jacoco.xml \
