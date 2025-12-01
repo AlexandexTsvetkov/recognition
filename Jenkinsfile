@@ -11,7 +11,6 @@ pipeline {
         PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.PATH}"
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
         SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
-        NVD_API_KEY = credentials('NVD_API_KEY')  // Добавляем API ключ
     }
 
     stages {
@@ -24,47 +23,32 @@ pipeline {
         stage('Dependency Check (SAST)') {
             steps {
                 script {
-                    // Создаем директорию для отчетов
                     sh 'mkdir -p reports/dependency-check'
 
-                    // Запускаем Dependency Check с API ключом
-                    try {
-                        dependencyCheck additionalArguments: """
-                            --scan .
-                            --format HTML
-                            --format JSON
-                            --out ./reports/dependency-check
-                            --enableExperimental
-                            --nvdApiKey ${NVD_API_KEY}
-                            --failOnCVSS 8
-                            --connectionTimeout 120000
-                        """, odcInstallation: 'OWASP-Dependency-Check'
-                    } catch (Exception e) {
-                        echo "Dependency Check завершился с ошибкой: ${e.message}"
-                        // Не прерываем сборку из-за SAST, делаем сборку unstable
-                        currentBuild.result = 'UNSTABLE'
-                    }
+                    // Используем параметр nvdApiKey напрямую
+                    dependencyCheck additionalArguments: """
+                        --scan . \
+                        --format HTML \
+                        --format JSON \
+                        --out ./reports/dependency-check \
+                        --enableExperimental \
+                        --nvdApiKey 017e90ab-c780-4784-8330-af846bd99fcb \
+                        --failOnCVSS 8 \
+                        --noupdate
+                    """, odcInstallation: 'OWASP-Dependency-Check'
                 }
             }
             post {
                 always {
                     script {
-                        // Проверяем, существует ли отчет
-                        def reportExists = fileExists 'reports/dependency-check/dependency-check-report.html'
-
-                        if (reportExists) {
-                            // Сохраняем HTML отчет
-                            archiveArtifacts artifacts: 'reports/dependency-check/*.html', fingerprint: false
-
-                            // Публикуем HTML отчет
+                        if (fileExists('reports/dependency-check/dependency-check-report.html')) {
                             publishHTML([
                                 allowMissing: false,
                                 alwaysLinkToLastBuild: true,
                                 keepAll: true,
                                 reportDir: 'reports/dependency-check',
                                 reportFiles: 'dependency-check-report.html',
-                                reportName: 'Dependency Check Report',
-                                includes: '*.html'
+                                reportName: 'Dependency Check Report'
                             ])
                         } else {
                             echo 'Отчет Dependency Check не был создан'
@@ -74,26 +58,17 @@ pipeline {
             }
         }
 
-        stage('Build & Code Coverage') {
-            when {
-                expression {
-                    // Пропускаем только если не FAILURE
-                    currentBuild.result != 'FAILURE'
-                }
-            }
+        stage('Build & Test') {
             steps {
                 script {
                     echo "Используем Maven: ${env.MAVEN_HOME}"
                     echo "Используем Java: ${env.JAVA_HOME}"
 
-                    // Очистка и сборка
-                    sh 'mvn clean compile -DskipTests'
+                    // Очистка, компиляция и тесты
+                    sh 'mvn clean compile test package'
 
-                    // Запуск тестов с покрытием JaCoCo
-                    sh 'mvn test jacoco:report'
-
-                    // Пакетирование
-                    sh 'mvn package -DskipTests'
+                    // Генерация отчетов JaCoCo
+                    sh 'mvn jacoco:report'
                 }
             }
             post {
@@ -105,20 +80,16 @@ pipeline {
                         keepAll: true,
                         reportDir: 'target/site/jacoco',
                         reportFiles: 'index.html',
-                        reportName: 'JaCoCo Code Coverage',
-                        includes: '*.html'
+                        reportName: 'JaCoCo Code Coverage'
                     ])
+
+                    // Сбор результатов тестов
+                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
                 }
             }
         }
 
         stage('SonarCloud Analysis') {
-            when {
-                expression {
-                    // Проверяем, что сборка прошла успешно или unstable
-                    currentBuild.result == null || currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE'
-                }
-            }
             steps {
                 script {
                     echo "Запуск анализа SonarCloud..."
@@ -142,74 +113,11 @@ pipeline {
             }
         }
 
-        stage('Build & Test Individual Services') {
-            when {
-                expression {
-                    currentBuild.result == null || currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE'
-                }
-            }
-            parallel {
-                stage('API Gateway') {
-                    steps {
-                        dir('recognition-api-gateway') {
-                            sh 'mvn clean test package'
-                        }
-                    }
-                    post {
-                        always {
-                            junit 'recognition-api-gateway/target/surefire-reports/*.xml'
-                        }
-                    }
-                }
-                stage('Request Service') {
-                    steps {
-                        dir('recognition-request-service') {
-                            sh 'mvn clean test package'
-                        }
-                    }
-                    post {
-                        always {
-                            junit 'recognition-request-service/target/surefire-reports/*.xml'
-                        }
-                    }
-                }
-                stage('Processing Service') {
-                    steps {
-                        dir('recognition-processing-service') {
-                            sh 'mvn clean test package'
-                        }
-                    }
-                    post {
-                        always {
-                            junit 'recognition-processing-service/target/surefire-reports/*.xml'
-                        }
-                    }
-                }
-                stage('Result Service') {
-                    steps {
-                        dir('recognition-result-service') {
-                            sh 'mvn clean test package'
-                        }
-                    }
-                    post {
-                        always {
-                            junit 'recognition-result-service/target/surefire-reports/*.xml'
-                        }
-                    }
-                }
-            }
-        }
-
         stage('SonarCloud Quality Gate') {
-            when {
-                expression {
-                    currentBuild.result == null || currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE'
-                }
-            }
             steps {
                 script {
                     // Ожидание и проверка Quality Gate
-                    timeout(time: 15, unit: 'MINUTES') {
+                    timeout(time: 10, unit: 'MINUTES') {
                         waitForQualityGate abortPipeline: false
                     }
                 }
@@ -217,11 +125,6 @@ pipeline {
         }
 
         stage('Save Artifacts') {
-            when {
-                expression {
-                    currentBuild.result == null || currentBuild.result == 'SUCCESS' || currentBuild.result == 'UNSTABLE'
-                }
-            }
             steps {
                 archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
             }
@@ -229,10 +132,6 @@ pipeline {
     }
 
     post {
-        always {
-            // Собираем результаты тестов из всех подпроектов
-            junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
-        }
         success {
             script {
                 def sonarProjectKey = "AlexandexTsvetkov_recognition"
@@ -250,23 +149,6 @@ pipeline {
             }
             echo 'Build completed successfully!'
         }
-        unstable {
-            script {
-                def sonarProjectKey = "AlexandexTsvetkov_recognition"
-                def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
-                def jenkinsUrl = env.BUILD_URL
-
-                def message = "Сборка завершена с предупреждениями! ⚠️\\nJenkins: ${jenkinsUrl}\\nSonarCloud: ${sonarUrl}"
-
-                sh """
-                    curl -X POST \
-                    -H 'Content-Type: application/json' \
-                    -d '{"chat_id": "486108633", "text": "${message}"}' \
-                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
-                """
-            }
-            echo 'Build unstable!'
-        }
         failure {
             script {
                 def jenkinsUrl = env.BUILD_URL
@@ -280,6 +162,20 @@ pipeline {
                 """
             }
             echo 'Build failed!'
+        }
+        unstable {
+            script {
+                def jenkinsUrl = env.BUILD_URL
+                def message = "Сборка завершена с предупреждениями! ⚠️\\nJenkins: ${jenkinsUrl}"
+
+                sh """
+                    curl -X POST \
+                    -H 'Content-Type: application/json' \
+                    -d '{"chat_id": "486108633", "text": "${message}"}' \
+                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                """
+            }
+            echo 'Build unstable!'
         }
     }
 }
