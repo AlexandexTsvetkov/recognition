@@ -68,7 +68,7 @@ pipeline {
                             -Dsonar.projectKey=AlexandexTsvetkov_recognition \
                             -Dsonar.organization=AlexandexTsvetkov \
                             -Dsonar.host.url=https://sonarcloud.io \
-                            -Dsonar.login=${SONAR_CLOUD_TOKEN} \
+                            -Dsonar.token=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
                             -Dsonar.java.binaries=target/classes \
                             -Dsonar.sourceEncoding=UTF-8
