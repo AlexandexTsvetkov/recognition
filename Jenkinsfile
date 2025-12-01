@@ -8,7 +8,8 @@ pipeline {
     environment {
         MAVEN_HOME = tool name: 'Maven-3.8.1', type: 'maven'
         JAVA_HOME = tool name: 'JDK21', type: 'jdk'
-        PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.PATH}"
+        DEPENDENCY_CHECK_HOME = tool name: 'Dependency-Check-9.0.10', type: 'dependency-check'
+        PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.DEPENDENCY_CHECK_HOME}/bin:${env.PATH}"
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
         SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
     }
@@ -57,71 +58,64 @@ pipeline {
         stage('Dependency Check (SAST)') {
             steps {
                 script {
-                    echo "🔒 SAST анализ временно отключен"
-                    echo "✅ Сборка успешна! Найдено 5 JAR файлов"
-                    echo "💡 Dependency Check будет настроен отдельно"
-                    echo "📋 Все основные этапы CI/CD работают корректно"
+                    echo "🔒 Запуск SAST анализа с OWASP Dependency Check"
 
-                    // Создаем информационный отчет
-                    sh '''
-                        mkdir -p reports/dependency-check
-                        cat > reports/dependency-check/info.html << 'EOF'
-                        <html>
-                        <head>
-                            <title>Dependency Check - В процессе настройки</title>
-                            <style>
-                                body { font-family: Arial, sans-serif; margin: 40px; }
-                                .success { color: #28a745; }
-                                .warning { color: #ffc107; }
-                                .info { color: #17a2b8; }
-                            </style>
-                        </head>
-                        <body>
-                            <h1>🔒 Dependency Check Report</h1>
-                            <p class="info">SAST анализ временно отключен для настройки.</p>
+                    // Создаем директорию для отчетов
+                    sh 'mkdir -p reports/dependency-check'
 
-                            <h2>📊 Статус сборки</h2>
-                            <p class="success">✅ Сборка успешна!</p>
+                    // Запускаем Dependency Check
+                    sh """
+                        dependency-check.sh \
+                        --project "Recognition System" \
+                        --scan "**/target/*.jar" \
+                        --scan "**/pom.xml" \
+                        --format "HTML" \
+                        --format "JSON" \
+                        --format "SARIF" \
+                        --out "reports/dependency-check" \
+                        --enableExperimental \
+                        --noupdate
+                    """
 
-                            <h2>📦 Созданные артефакты</h2>
-                            <ul>
-                                <li>recognition-api-gateway-0.0.1-SNAPSHOT.jar</li>
-                                <li>recognition-common-0.0.1-SNAPSHOT.jar</li>
-                                <li>recognition-result-service-0.0.1-SNAPSHOT.jar</li>
-                                <li>recognition-processing-service-0.0.1-SNAPSHOT.jar</li>
-                                <li>recognition-request-service-0.0.1-SNAPSHOT.jar</li>
-                            </ul>
-
-                            <h2>🚀 Рабочие компоненты CI/CD</h2>
-                            <ul>
-                                <li>✅ Автоматическая сборка при коммитах</li>
-                                <li>✅ Тестирование и отчеты JaCoCo</li>
-                                <li>✅ Анализ качества кода в SonarCloud</li>
-                                <li>✅ Уведомления в Telegram</li>
-                                <li>✅ Сохранение артефактов</li>
-                                <li>🔄 Dependency Check (в процессе настройки)</li>
-                            </ul>
-
-                            <h2>📝 Следующие шаги</h2>
-                            <p>1. Настроить OWASP Dependency Check плагин в Jenkins</p>
-                            <p>2. Добавить SAST анализ в pipeline</p>
-                            <p>3. Настроить политики безопасности</p>
-                        </body>
-                        </html>
-                        EOF
-                    '''
+                    // Альтернативный вариант с Maven плагином (если предпочтительнее)
+                    // sh 'mvn org.owasp:dependency-check-maven:check'
                 }
             }
             post {
                 always {
+                    // Публикуем HTML отчет
                     publishHTML([
                         allowMissing: false,
                         alwaysLinkToLastBuild: true,
                         keepAll: true,
                         reportDir: 'reports/dependency-check',
-                        reportFiles: 'info.html',
-                        reportName: 'Dependency Check Report'
+                        reportFiles: 'dependency-check-report.html',
+                        reportName: 'OWASP Dependency Check Report'
                     ])
+
+                    // Сохраняем JSON отчет для дальнейшей обработки
+                    archiveArtifacts artifacts: 'reports/dependency-check/*.json, reports/dependency-check/*.sarif', fingerprint: false
+
+                    // Запись результатов в лог
+                    script {
+                        def reportPath = "${env.WORKSPACE}/reports/dependency-check/dependency-check-report.json"
+                        if (fileExists(reportPath)) {
+                            def report = readJSON file: reportPath
+                            def vulnerabilities = report.dependencies?.findAll { it.vulnerabilities }?.size() ?: 0
+                            def totalVulns = report.dependencies?.sum { it.vulnerabilities?.size() ?: 0 } ?: 0
+
+                            echo "📊 Результаты Dependency Check:"
+                            echo "📦 Проанализировано зависимостей: ${report.dependencies?.size() ?: 0}"
+                            echo "⚠️  Зависимостей с уязвимостями: ${vulnerabilities}"
+                            echo "🔴 Всего уязвимостей: ${totalVulns}"
+
+                            // Устанавливаем качество сборки
+                            if (totalVulns > 10) {
+                                currentBuild.result = 'UNSTABLE'
+                                echo "⚠️  Найдено много уязвимостей, сборка помечена как нестабильная"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -131,10 +125,8 @@ pipeline {
                 script {
                     echo "Запуск анализа SonarCloud..."
                     echo "Project Key: AlexandexTsvetkov_recognition"
-                    echo "Organization: AlexandexTsvetkov (из project key)"
 
                     withSonarQubeEnv('SonarCloud') {
-                        // Вариант 1: С организацией (правильный регистр)
                         sh """
                             mvn sonar:sonar \
                             -Dsonar.projectKey=AlexandexTsvetkov_recognition \
@@ -143,6 +135,8 @@ pipeline {
                             -Dsonar.token=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
                             -Dsonar.java.binaries=target/classes \
+                            -Dsonar.dependencyCheck.jsonReportPath=reports/dependency-check/dependency-check-report.json \
+                            -Dsonar.dependencyCheck.htmlReportPath=reports/dependency-check/dependency-check-report.html \
                             -Dsonar.sourceEncoding=UTF-8
                         """
                     }
@@ -160,52 +154,43 @@ pipeline {
     post {
         always {
             echo "Pipeline завершен с результатом: ${currentBuild.result}"
-        }
-        success {
+
+            // Общий отчет о сборке
             script {
                 def sonarProjectKey = "AlexandexTsvetkov_recognition"
                 def sonarUrl = "https://sonarcloud.io/dashboard?id=${sonarProjectKey}"
                 def jenkinsUrl = env.BUILD_URL
+                def dependencyCheckUrl = "${jenkinsUrl}dependency-check/"
 
                 def message = """
-                🎉 Сборка завершена успешно!
+                🎉 Сборка завершена!
 
                 📊 Отчеты:
                 - Jenkins: ${jenkinsUrl}
                 - SonarCloud: ${sonarUrl}
-                - JaCoCo Coverage: доступно в Jenkins
+                - Dependency Check: ${dependencyCheckUrl}
+                - JaCoCo Coverage: ${jenkinsUrl}jacoco/
 
-                ✅ Все основные компоненты CI/CD работают!
-                🔒 SAST анализ будет настроен отдельно.
+                📈 Статус: ${currentBuild.result ?: 'SUCCESS'}
 
-                Проверьте качество кода в SonarCloud!
+                Проверьте отчеты для деталей!
                 """.stripIndent().trim()
 
-                // Формируем JSON безопасно
                 def jsonMessage = message.replace('"', '\\"').replace('\n', '\\n')
 
                 sh """
-                    curl -X POST \
+                    curl -s -X POST \
                     -H 'Content-Type: application/json' \
                     -d '{"chat_id": "486108633", "text": "${jsonMessage}"}' \
                     https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                 """
             }
-            echo 'Build completed successfully!'
         }
         failure {
-            script {
-                def jenkinsUrl = env.BUILD_URL
-                def message = "Сборка провалилась! ❌\\nJenkins: ${jenkinsUrl}\\nПроверьте логи для деталей."
-
-                sh """
-                    curl -X POST \
-                    -H 'Content-Type: application/json' \
-                    -d '{"chat_id": "486108633", "text": "${message}"}' \
-                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
-                """
-            }
             echo 'Build failed!'
+        }
+        unstable {
+            echo 'Build unstable due to security vulnerabilities!'
         }
     }
 }
