@@ -58,31 +58,21 @@ pipeline {
             steps {
                 script {
                     echo "Запуск анализа SonarCloud..."
+                    echo "Project Key: AlexandexTsvetkov_recognition"
+                    echo "Organization: AlexandexTsvetkov (из project key)"
 
-                    // Для SonarCloud с multi-module проектом
                     withSonarQubeEnv('SonarCloud') {
-                        // Важно: используем одинарные кавычки и экранирование
-                        sh '''
+                        // Вариант 1: С организацией (правильный регистр)
+                        sh """
                             mvn sonar:sonar \
                             -Dsonar.projectKey=AlexandexTsvetkov_recognition \
-                            -Dsonar.organization=alexandextsvetkov \
+                            -Dsonar.organization=AlexandexTsvetkov \
                             -Dsonar.host.url=https://sonarcloud.io \
-                            -Dsonar.login=''' + "${SONAR_CLOUD_TOKEN}" + ''' \
+                            -Dsonar.login=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
                             -Dsonar.java.binaries=target/classes \
                             -Dsonar.sourceEncoding=UTF-8
-                        '''
-                    }
-                }
-            }
-        }
-
-        stage('SonarCloud Quality Gate') {
-            steps {
-                script {
-                    // Ожидание и проверка Quality Gate
-                    timeout(time: 10, unit: 'MINUTES') {
-                        waitForQualityGate abortPipeline: false
+                        """
                     }
                 }
             }
