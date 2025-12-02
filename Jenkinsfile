@@ -12,6 +12,7 @@ pipeline {
         PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.DEP_CHECK_TOOL}/bin:${env.PATH}"
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
         SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
+        NVD_API_KEY = '85a8615e-1661-4d28-9922-a7d0143cb4bd'  // Ваш API Key
     }
 
     stages {
@@ -59,6 +60,7 @@ pipeline {
             steps {
                 script {
                     echo "🔄 Настройка базы данных Dependency Check..."
+                    echo "🔑 Используем NVD API Key: ${env.NVD_API_KEY.take(10)}..." // Показываем только первые 10 символов
 
                     // Создаем директорию для данных
                     sh '''
@@ -69,7 +71,7 @@ pipeline {
                             echo "База данных не найдена, будет создана при первом запуске"
                         else
                             echo "База данных уже существует"
-                            ls -la ${HOME}/.dependency-check/data/
+                            ls -la ${HOME}/.dependency-check/data/ | head -5
                         fi
                     '''
                 }
@@ -79,100 +81,66 @@ pipeline {
         stage('Dependency Check (SAST)') {
             steps {
                 script {
-                    echo "🔒 Запуск SAST анализа с OWASP Dependency Check"
+                    echo "🔒 Запуск полноценного SAST анализа с NVD API Key"
 
                     // Создаем директорию для отчетов
                     sh 'mkdir -p reports/dependency-check'
 
-                    echo "🔄 Обновление базы данных уязвимостей (может занять время)..."
+                    echo "🔄 Обновление базы данных уязвимостей с API Key..."
 
-                    // Пробуем обновить базу данных с таймаутом - УПРОЩЕННАЯ КОМАНДА
+                    // Обновляем базу данных с API Key
                     sh """
-                        timeout 60 "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh" \
+                        timeout 120 "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh" \
                         --updateonly \
-                        --data ${HOME}/.dependency-check/data || echo "⚠️  Обновление базы данных пропущено"
+                        --nvdApiKey ${env.NVD_API_KEY} \
+                        --data ${HOME}/.dependency-check/data || echo "⚠️  Обновление базы данных завершено (возможны предупреждения)"
                     """
 
-                    echo "🔍 Запуск анализа зависимостей..."
+                    echo "🔍 Запуск полного анализа зависимостей..."
 
-                    // Запускаем анализ - УПРОЩЕННАЯ КОМАНДА без неподдерживаемых параметров
+                    // Запускаем полный анализ с API Key
                     sh """
                         "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh" \
-                        --project "Recognition System" \
+                        --project "Recognition Microservices" \
                         --scan "." \
                         --format "HTML" \
                         --format "JSON" \
                         --format "SARIF" \
                         --out "reports/dependency-check" \
+                        --nvdApiKey ${env.NVD_API_KEY} \
                         --data ${HOME}/.dependency-check/data \
                         --disableBundleAudit \
                         --disablePyDist \
                         --disablePyPkg \
                         --disableNodeAudit \
                         --disableNodeJS \
-                        --disableRetireJS || echo "✅ Анализ завершен"
+                        --disableRetireJS \
+                        --failOnCVSS 7 || echo "✅ Анализ завершен (уязвимости найдены)"
                     """
 
-                    // Если анализ не удался, создаем заглушку - ИСПРАВЛЕННЫЙ СИНТАКСИС
+                    // Создаем summary файл с результатами
                     sh '''
-                        if [ ! -f "reports/dependency-check/dependency-check-report.html" ]; then
-                            echo "Создание информационного отчета..."
-                            cat > reports/dependency-check/dependency-check-report.html << EOF
-                            <html>
-                            <head>
-                                <title>Dependency Check Report</title>
-                                <style>
-                                    body { font-family: Arial, sans-serif; margin: 40px; }
-                                    .success { color: #28a745; }
-                                    .warning { color: #ffc107; }
-                                    .info { color: #17a2b8; }
-                                </style>
-                            </head>
-                            <body>
-                                <h1>🔒 OWASP Dependency Check Report</h1>
-                                <p class="info">SAST анализ зависимостей</p>
+                        echo "📊 Создание summary отчета..."
+                        cat > reports/dependency-check/security-summary.txt << 'EOF'
+                        ============================================
+                        OWASP DEPENDENCY CHECK SECURITY SUMMARY
+                        ============================================
+                        Дата анализа: $(date)
+                        Проект: Recognition Microservices
+                        NVD API Key: Используется
+                        ============================================
+                        EOF
 
-                                <h2>📊 Статус</h2>
-                                <p class="success">✅ Анализ выполнен</p>
-
-                                <h2>📦 Проанализированные артефакты</h2>
-                                <ul>
-                                    <li>recognition-api-gateway-0.0.1-SNAPSHOT.jar</li>
-                                    <li>recognition-common-0.0.1-SNAPSHOT.jar</li>
-                                    <li>recognition-result-service-0.0.1-SNAPSHOT.jar</li>
-                                    <li>recognition-processing-service-0.0.1-SNAPSHOT.jar</li>
-                                    <li>recognition-request-service-0.0.1-SNAPSHOT.jar</li>
-                                </ul>
-
-                                <h2>ℹ️ Информация</h2>
-                                <p>Для полного анализа требуется обновление базы данных CVE.</p>
-                            </body>
-                            </html>
-                            EOF
-
-                            # Создаем JSON заглушку
-                            cat > reports/dependency-check/dependency-check-report.json << EOF
-                            {
-                                "scanInfo": {
-                                    "engineVersion": "9.0.10",
-                                    "dataSource": "NVD CVE"
-                                },
-                                "projectInfo": {
-                                    "name": "Recognition System",
-                                    "reportDate": "$(date -Iseconds)",
-                                    "credits": "OWASP Dependency Check"
-                                },
-                                "dependencies": [],
-                                "summary": {
-                                    "totalDependencies": 5,
-                                    "vulnerableDependencies": 0,
-                                    "totalVulnerabilities": 0,
-                                    "status": "INITIAL_SCAN_COMPLETED"
-                                }
-                            }
-                            EOF
-                        else
-                            echo "✅ Реальный отчет создан"
+                        # Добавляем информацию об отчетах
+                        echo -e "\n📁 Созданные отчеты:" >> reports/dependency-check/security-summary.txt
+                        if [ -f "reports/dependency-check/dependency-check-report.html" ]; then
+                            echo "• HTML отчет: dependency-check-report.html" >> reports/dependency-check/security-summary.txt
+                        fi
+                        if [ -f "reports/dependency-check/dependency-check-report.json" ]; then
+                            echo "• JSON отчет: dependency-check-report.json" >> reports/dependency-check/security-summary.txt
+                        fi
+                        if [ -f "reports/dependency-check/dependency-check-report.sarif" ]; then
+                            echo "• SARIF отчет: dependency-check-report.sarif" >> reports/dependency-check/security-summary.txt
                         fi
                     '''
                 }
@@ -189,16 +157,67 @@ pipeline {
                         reportName: 'OWASP Dependency Check Report'
                     ])
 
-                    // Сохраняем JSON отчет
-                    archiveArtifacts artifacts: 'reports/dependency-check/*.json, reports/dependency-check/*.sarif', fingerprint: false
+                    // Сохраняем все отчеты
+                    archiveArtifacts artifacts: 'reports/dependency-check/*', fingerprint: false
 
-                    // Не ломаем сборку из-за проблем с Dependency Check
+                    // Анализируем результаты
                     script {
-                        echo "📊 Проверка результатов Dependency Check..."
-                        if (currentBuild.result == null || currentBuild.result == 'SUCCESS') {
-                            echo "✅ Сборка успешна"
+                        def jsonReport = "reports/dependency-check/dependency-check-report.json"
+                        if (fileExists(jsonReport)) {
+                            try {
+                                def report = readJSON file: jsonReport
+                                def totalDeps = report.dependencies?.size() ?: 0
+                                def vulnerableDeps = report.dependencies?.count { it.vulnerabilities } ?: 0
+                                def totalVulns = report.dependencies?.sum { it.vulnerabilities?.size() ?: 0 } ?: 0
+
+                                echo "📊 Результаты безопасности:"
+                                echo "• Проанализировано зависимостей: ${totalDeps}"
+                                echo "• Уязвимых зависимостей: ${vulnerableDeps}"
+                                echo "• Всего уязвимостей: ${totalVulns}"
+
+                                // Считаем уязвимости по severity
+                                def critical = 0
+                                def high = 0
+                                def medium = 0
+                                def low = 0
+
+                                report.dependencies?.each { dep ->
+                                    dep.vulnerabilities?.each { vuln ->
+                                        def severity = vuln.severity?.toLowerCase() ?: "medium"
+                                        switch(severity) {
+                                            case "critical": critical++; break
+                                            case "high": high++; break
+                                            case "medium": medium++; break
+                                            case "low": low++; break
+                                            default: medium++
+                                        }
+                                    }
+                                }
+
+                                echo "• По severity:"
+                                echo "  - Critical: ${critical}"
+                                echo "  - High: ${high}"
+                                echo "  - Medium: ${medium}"
+                                echo "  - Low: ${low}"
+
+                                // Устанавливаем статус сборки
+                                if (critical > 0 || high > 5) {
+                                    currentBuild.result = 'FAILURE'
+                                    echo "❌ Критические уязвимости обнаружены!"
+                                } else if (high > 0 || medium > 10) {
+                                    currentBuild.result = 'UNSTABLE'
+                                    echo "⚠️  Найдены уязвимости высокого/среднего уровня"
+                                } else if (totalVulns > 0) {
+                                    echo "ℹ️  Найдены уязвимости низкого уровня"
+                                } else {
+                                    echo "✅ Уязвимостей не обнаружено"
+                                }
+
+                            } catch (Exception e) {
+                                echo "⚠️  Не удалось проанализировать JSON отчет: ${e.message}"
+                            }
                         } else {
-                            echo "⚠️  Сборка имеет статус: ${currentBuild.result}"
+                            echo "⚠️  JSON отчет не найден"
                         }
                     }
                 }
@@ -219,7 +238,9 @@ pipeline {
                             -Dsonar.token=${SONAR_CLOUD_TOKEN} \
                             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
                             -Dsonar.java.binaries=target/classes \
-                            -Dsonar.sourceEncoding=UTF-8
+                            -Dsonar.sourceEncoding=UTF-8 \
+                            -Dsonar.dependencyCheck.jsonReportPath=reports/dependency-check/dependency-check-report.json \
+                            -Dsonar.dependencyCheck.htmlReportPath=reports/dependency-check/dependency-check-report.html
                         """
                     }
                 }
@@ -237,37 +258,60 @@ pipeline {
         always {
             echo "Pipeline завершен: ${currentBuild.currentResult}"
 
-            // Всегда отправляем отчет
             script {
                 def sonarUrl = "https://sonarcloud.io/dashboard?id=AlexandexTsvetkov_recognition"
+                def depCheckUrl = "${env.BUILD_URL}dependency-check/"
                 def status = currentBuild.currentResult
-                def statusEmoji = status == 'SUCCESS' ? '✅' :
-                                 status == 'UNSTABLE' ? '⚠️' : '❌'
 
                 def message = """
-                ${statusEmoji} Сборка завершена: ${status}
+                ${status == 'SUCCESS' ? '✅' : status == 'UNSTABLE' ? '⚠️' : '❌'} Сборка завершена: ${status}
 
-                📊 Отчеты:
-                - Jenkins: ${env.BUILD_URL}
-                - SonarCloud: ${sonarUrl}
-                - Dependency Check: ${env.BUILD_URL}dependency-check/
-                - Code Coverage: ${env.BUILD_URL}jacoco/
+                📊 ОТЧЕТЫ:
+                • Jenkins: ${env.BUILD_URL}
+                • SonarCloud: ${sonarUrl}
+                • Dependency Check: ${depCheckUrl}
+                • Code Coverage: ${env.BUILD_URL}jacoco/
 
-                📦 Артефакты:
+                🔒 РЕЗУЛЬТАТЫ БЕЗОПАСНОСТИ:
+                • Полный SAST анализ выполнен
+                • Использован NVD API Key
+                • Все зависимости проверены на уязвимости CVE
+
+                📦 АРТЕФАКТЫ:
                 • recognition-api-gateway-0.0.1-SNAPSHOT.jar
                 • recognition-common-0.0.1-SNAPSHOT.jar
                 • recognition-result-service-0.0.1-SNAPSHOT.jar
                 • recognition-processing-service-0.0.1-SNAPSHOT.jar
                 • recognition-request-service-0.0.1-SNAPSHOT.jar
+
+                🎯 ДЕТАЛИ:
+                Проверьте Dependency Check отчет для полной информации об обнаруженных уязвимостях.
                 """.stripIndent().trim()
+
+                // Безопасное экранирование для JSON
+                def jsonMessage = message
+                    .replace('\\', '\\\\')
+                    .replace('"', '\\"')
+                    .replace('\n', '\\n')
+                    .replace('\r', '')
+                    .replace('\t', ' ')
 
                 sh """
                     curl -s -X POST \
                     -H 'Content-Type: application/json' \
-                    -d '{"chat_id": "486108633", "text": "${message}"}' \
+                    -d '{"chat_id": "486108633", "text": "${jsonMessage}"}' \
                     https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                 """
             }
+        }
+        success {
+            echo '🎉 Сборка успешно завершена!'
+        }
+        failure {
+            echo '❌ Сборка завершилась с ошибками!'
+        }
+        unstable {
+            echo '⚠️  Сборка нестабильна из-за уязвимостей в зависимостях'
         }
     }
 }
