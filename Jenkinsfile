@@ -206,12 +206,12 @@ pipeline {
             }
         }
 
-        stage('Deploy to Nexus') {
+        stage('Deploy All Artifacts to Nexus') {
             steps {
                 script {
-                    echo "🚀 Подготовка к деплою в Nexus..."
+                    echo "🚀 Подготовка к деплою всех артефактов в Nexus..."
 
-                    // Получаем версию из pom.xml через shell
+                    // Получаем версию из pom.xml
                     sh '''
                         echo "Чтение версии из pom.xml..."
                         if [ -f "pom.xml" ]; then
@@ -224,7 +224,6 @@ pipeline {
                         fi
                     '''
 
-                    // Загружаем версию в переменную окружения
                     def version = readFile('version.env').trim().split('=')[1]
                     def isSnapshot = version.contains('-SNAPSHOT')
 
@@ -241,6 +240,15 @@ pipeline {
                             exit 0
                         fi
                     """
+
+                    // Список модулей для деплоя
+                    def modules = [
+                        'recognition-api-gateway',
+                        'recognition-common',
+                        'recognition-result-service',
+                        'recognition-processing-service',
+                        'recognition-request-service'
+                    ]
 
                     withCredentials([usernamePassword(
                         credentialsId: 'nexus-credentials',
@@ -260,29 +268,52 @@ pipeline {
                             </settings>
                         """
 
-                        // Определяем URL для деплоя
                         def deployUrl = "${NEXUS_URL}/repository/${isSnapshot ? NEXUS_REPO_SNAPSHOT : NEXUS_REPO_RELEASE}"
 
-                        // Выполняем деплой
-                        sh """
-                            echo "Выполняем деплой в ${deployUrl}"
-                            mvn deploy:deploy-file \
-                                -Dfile=recognition-api-gateway/target/recognition-api-gateway-${version}.jar \
-                                -DgroupId=ru.grafit \
-                                -DartifactId=recognition-api-gateway \
-                                -Dversion=${version} \
-                                -Dpackaging=jar \
-                                -DrepositoryId=nexus \
-                                -Durl=${deployUrl} \
-                                -s settings.xml \
-                            || echo "Деплой завершен"
-                        """
+                        // Деплоим все модули
+                        modules.each { module ->
+                            echo "📤 Загрузка модуля: ${module}"
+
+                            def jarFile = "${module}/target/${module}-${version}.jar"
+                            def pomFile = "${module}/pom.xml"
+
+                            if (fileExists(jarFile)) {
+                                sh """
+                                    echo "Загружаем ${module}..."
+                                    mvn deploy:deploy-file \
+                                        -Dfile=${jarFile} \
+                                        -DpomFile=${pomFile} \
+                                        -DrepositoryId=nexus \
+                                        -Durl=${deployUrl} \
+                                        -s settings.xml \
+                                    || echo "⚠️ Не удалось загрузить ${module}"
+                                """
+                            } else {
+                                echo "⚠️ Файл ${jarFile} не найден, пропускаем"
+                            }
+                        }
+
+                        // Также загружаем родительский pom
+                        if (fileExists('pom.xml')) {
+                            sh """
+                                echo "Загружаем родительский POM..."
+                                mvn deploy:deploy-file \
+                                    -Dfile=pom.xml \
+                                    -DpomFile=pom.xml \
+                                    -DrepositoryId=nexus \
+                                    -Durl=${deployUrl} \
+                                    -s settings.xml \
+                                || echo "⚠️ Не удалось загрузить родительский POM"
+                            """
+                        }
 
                         // Очищаем временный файл
                         sh 'rm -f settings.xml'
                     }
 
                     // Сохраняем информацию о деплое
+                    def deployedModules = modules.findAll { fileExists("${it}/target/${it}-${version}.jar") }
+
                     writeFile file: 'nexus-deploy-info.txt', text: """
                         Nexus Deploy Information
                         ========================
@@ -290,10 +321,21 @@ pipeline {
                         Project: Recognition Microservices
                         Version: ${version}
                         Repository: ${isSnapshot ? NEXUS_REPO_SNAPSHOT : NEXUS_REPO_RELEASE}
-                        URL: ${NEXUS_URL}
+                        URL: ${NEXUS_URL}/repository/${isSnapshot ? NEXUS_REPO_SNAPSHOT : NEXUS_REPO_RELEASE}
+
+                        Загруженные модули (${deployedModules.size()}):
+                        ${deployedModules.collect { "- ${it}-${version}.jar" }.join('\n')}
+
+                        Ссылки:
+                        - Браузер: ${NEXUS_URL}/#browse/browse
+                        - URL репозитория: ${NEXUS_URL}/repository/${isSnapshot ? NEXUS_REPO_SNAPSHOT : NEXUS_REPO_RELEASE}
                     """
 
                     archiveArtifacts artifacts: 'nexus-deploy-info.txt', fingerprint: false
+
+                    echo "✅ Все артефакты загружены в Nexus!"
+                    echo "🌐 URL Nexus: ${NEXUS_URL}"
+                    echo "📂 Браузер: ${NEXUS_URL}/#browse/browse"
                 }
             }
         }
