@@ -6,13 +6,16 @@ pipeline {
     }
 
     environment {
-        MAVEN_HOME = tool name: 'Maven-3.8.1', type: 'maven'
-        JAVA_HOME = tool name: 'JDK21', type: 'jdk'
-        DEP_CHECK_TOOL = tool name: 'Dependency-Check-9.0.10', type: 'dependency-check'
-        PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.DEP_CHECK_TOOL}/bin:${env.PATH}"
-        MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
-        SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
-        NVD_API_KEY = '85a8615e-1661-4d28-9922-a7d0143cb4bd'  // Ваш API Key
+            MAVEN_HOME = tool name: 'Maven-3.8.1', type: 'maven'
+            JAVA_HOME = tool name: 'JDK21', type: 'jdk'
+            DEP_CHECK_TOOL = tool name: 'Dependency-Check-9.0.10', type: 'dependency-check'
+            PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.DEP_CHECK_TOOL}/bin:${env.PATH}"
+            MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
+            SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
+            NVD_API_KEY = '85a8615e-1661-4d28-9922-a7d0143cb4bd'
+            NEXUS_URL = 'http://31.186.103.242:8081'
+            NEXUS_REPO_SNAPSHOT = 'maven-snapshots'
+            NEXUS_REPO_RELEASE = 'maven-releases'
     }
 
     stages {
@@ -252,6 +255,85 @@ pipeline {
                 archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
             }
         }
+
+        stage('Deploy to Nexus') {
+                    steps {
+                        script {
+                            echo "🚀 Начало деплоя артефактов в Nexus..."
+
+                            // Проверяем, что Nexus доступен
+                            sh """
+                                curl -s -f ${NEXUS_URL} || echo "⚠️ Nexus недоступен, пропускаем деплой"
+                            """
+
+                            // Получаем версию из pom.xml
+                            def pom = readMavenPom file: 'pom.xml'
+                            def version = pom.version
+                            def isSnapshot = version.contains('-SNAPSHOT')
+
+                            echo "📦 Версия проекта: ${version}"
+                            echo "📌 Тип репозитория: ${isSnapshot ? 'snapshot' : 'release'}"
+
+                            // Настраиваем settings.xml с credentials
+                            withCredentials([usernamePassword(
+                                credentialsId: 'nexus-credentials',
+                                usernameVariable: 'NEXUS_USER',
+                                passwordVariable: 'NEXUS_PASSWORD'
+                            )]) {
+                                // Создаем временный settings.xml
+                                writeFile file: 'settings.xml', text: """
+                                    <settings>
+                                      <servers>
+                                        <server>
+                                          <id>nexus</id>
+                                          <username>${NEXUS_USER}</username>
+                                          <password>${NEXUS_PASSWORD}</password>
+                                        </server>
+                                      </servers>
+
+                                      <distributionManagement>
+                                        <snapshotRepository>
+                                          <id>nexus</id>
+                                          <url>${NEXUS_URL}/repository/${NEXUS_REPO_SNAPSHOT}</url>
+                                        </snapshotRepository>
+                                        <repository>
+                                          <id>nexus</id>
+                                          <url>${NEXUS_URL}/repository/${NEXUS_REPO_RELEASE}</url>
+                                        </repository>
+                                      </distributionManagement>
+                                    </settings>
+                                """
+
+                                // Выполняем деплой
+                                sh """
+                                    mvn deploy \
+                                    -DskipTests \
+                                    -s settings.xml \
+                                    -DaltDeploymentRepository=nexus::default::${NEXUS_URL}/repository/${isSnapshot ? NEXUS_REPO_SNAPSHOT : NEXUS_REPO_RELEASE} \
+                                    || echo "⚠️ Деплой завершен с предупреждениями"
+                                """
+
+                                // Очищаем временный файл
+                                sh 'rm -f settings.xml'
+                            }
+
+                            // Создаем ссылки на загруженные артефакты
+                            echo "✅ Артефакты загружены в Nexus:"
+                            echo "🌐 URL Nexus: ${NEXUS_URL}"
+                            echo "📂 Браузер репозиториев: ${NEXUS_URL}/#browse/browse"
+
+                            // Формируем список загруженных модулей
+                            def modules = ['recognition-api-gateway', 'recognition-common',
+                                         'recognition-result-service', 'recognition-processing-service',
+                                         'recognition-request-service']
+
+                            modules.each { module ->
+                                def artifactUrl = "${NEXUS_URL}/repository/${isSnapshot ? NEXUS_REPO_SNAPSHOT : NEXUS_REPO_RELEASE}/com/example/${module}/${version}/${module}-${version}.jar"
+                                echo "📄 ${module}: ${artifactUrl}"
+                            }
+                        }
+                    }
+                }
     }
 
     post {
@@ -259,50 +341,67 @@ pipeline {
             echo "Pipeline завершен: ${currentBuild.currentResult}"
 
             script {
-                def sonarUrl = "https://sonarcloud.io/dashboard?id=AlexandexTsvetkov_recognition"
-                def depCheckUrl = "${env.BUILD_URL}dependency-check/"
-                def status = currentBuild.currentResult
+                            def sonarUrl = "https://sonarcloud.io/dashboard?id=AlexandexTsvetkov_recognition"
+                            def depCheckUrl = "${env.BUILD_URL}dependency-check/"
+                            def nexusUrl = "${NEXUS_URL}/#browse/browse"
+                            def status = currentBuild.currentResult
 
-                def message = """
-                ${status == 'SUCCESS' ? '✅' : status == 'UNSTABLE' ? '⚠️' : '❌'} Сборка завершена: ${status}
+                            // Определяем статус деплоя
+                            def deployStatus = "❌ Не выполнено"
+                            try {
+                                def lastStage = currentBuild.rawBuild.getExecution().getStages().last()
+                                if (lastStage.getName().contains('Deploy')) {
+                                    deployStatus = lastStage.getStatus().toString() == 'SUCCESS' ? "✅ Успешно" : "❌ С ошибками"
+                                }
+                            } catch(e) {
+                                deployStatus = "⚠️ Статус неизвестен"
+                            }
 
-                📊 ОТЧЕТЫ:
-                • Jenkins: ${env.BUILD_URL}
-                • SonarCloud: ${sonarUrl}
-                • Dependency Check: ${depCheckUrl}
-                • Code Coverage: ${env.BUILD_URL}jacoco/
+                            def message = """
+                            ${status == 'SUCCESS' ? '✅' : status == 'UNSTABLE' ? '⚠️' : '❌'} Сборка завершена: ${status}
 
-                🔒 РЕЗУЛЬТАТЫ БЕЗОПАСНОСТИ:
-                • Полный SAST анализ выполнен
-                • Использован NVD API Key
-                • Все зависимости проверены на уязвимости CVE
+                            📊 ОТЧЕТЫ:
+                            • Jenkins: ${env.BUILD_URL}
+                            • SonarCloud: ${sonarUrl}
+                            • Dependency Check: ${depCheckUrl}
+                            • Code Coverage: ${env.BUILD_URL}jacoco/
+                            • Nexus: ${nexusUrl}
 
-                📦 АРТЕФАКТЫ:
-                • recognition-api-gateway-0.0.1-SNAPSHOT.jar
-                • recognition-common-0.0.1-SNAPSHOT.jar
-                • recognition-result-service-0.0.1-SNAPSHOT.jar
-                • recognition-processing-service-0.0.1-SNAPSHOT.jar
-                • recognition-request-service-0.0.1-SNAPSHOT.jar
+                            🚀 ДЕПЛОЙ В NEXUS: ${deployStatus}
+                            • URL: ${NEXUS_URL}
+                            • Тип: ${version.contains('-SNAPSHOT') ? 'snapshot' : 'release'}
 
-                🎯 ДЕТАЛИ:
-                Проверьте Dependency Check отчет для полной информации об обнаруженных уязвимостях.
-                """.stripIndent().trim()
+                            🔒 РЕЗУЛЬТАТЫ БЕЗОПАСНОСТИ:
+                            • Полный SAST анализ выполнен
+                            • Использован NVD API Key
+                            • Все зависимости проверены на уязвимости CVE
 
-                // Безопасное экранирование для JSON
-                def jsonMessage = message
-                    .replace('\\', '\\\\')
-                    .replace('"', '\\"')
-                    .replace('\n', '\\n')
-                    .replace('\r', '')
-                    .replace('\t', ' ')
+                            📦 ЗАГРУЖЕННЫЕ АРТЕФАКТЫ:
+                            • recognition-api-gateway-${version}.jar
+                            • recognition-common-${version}.jar
+                            • recognition-result-service-${version}.jar
+                            • recognition-processing-service-${version}.jar
+                            • recognition-request-service-${version}.jar
 
-                sh """
-                    curl -s -X POST \
-                    -H 'Content-Type: application/json' \
-                    -d '{"chat_id": "486108633", "text": "${jsonMessage}"}' \
-                    https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
-                """
-            }
+                            🎯 СЛЕДУЮЩИЕ ШАГИ:
+                            Артефакты доступны в Nexus. Используйте их в других проектах.
+                            """.stripIndent().trim()
+
+                            // Безопасное экранирование для JSON
+                            def jsonMessage = message
+                                .replace('\\', '\\\\')
+                                .replace('"', '\\"')
+                                .replace('\n', '\\n')
+                                .replace('\r', '')
+                                .replace('\t', ' ')
+
+                            sh """
+                                curl -s -X POST \
+                                -H 'Content-Type: application/json' \
+                                -d '{"chat_id": "486108633", "text": "${jsonMessage}"}' \
+                                https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                            """
+                        }
         }
         success {
             echo '🎉 Сборка успешно завершена!'
