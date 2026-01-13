@@ -589,9 +589,8 @@ echo "Деплой подготовлен в директории: \${DEPLOY_DIR
 
                     sh "chmod +x deploy-to-production.sh"
 
-                    // Генерируем README
-                    writeFile file: 'DEPLOYMENT.md', text: """
-# Деплой Recognition Microservices
+                    // Генерируем README - ИСПРАВЛЕНО: экранирование обратных кавычек
+                    writeFile file: 'DEPLOYMENT.md', text: """# Деплой Recognition Microservices
 
 ## Информация о сборке
 - **Версия**: ${env.PROJECT_VERSION}
@@ -600,10 +599,10 @@ echo "Деплой подготовлен в директории: \${DEPLOY_DIR
 - **Docker Repository**: ${env.NEXUS_DOCKER_REPOSITORY}
 
 ## Доступные образы
-1. **API Gateway**: \`${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}\`
-2. **Request Service**: \`${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}\`
-3. **Processing Service**: \`${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}\`
-4. **Result Service**: \`${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}\`
+1. **API Gateway**: `${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}`
+2. **Request Service**: `${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}`
+3. **Processing Service**: `${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}`
+4. **Result Service**: `${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}`
 
 ## Инструкция по деплою
 
@@ -677,7 +676,7 @@ ${env.NEXUS_URL}/repository/${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NE
                     sh """
                         curl -s -X POST \
                         -H 'Content-Type: application/json' \
-                        -d '{"chat_id": "486108633", "text": "${emoji} CI/CD Pipeline завершен: ${currentBuild.currentResult}\\nВерсия: ${env.PROJECT_VERSION ?: 'N/A'}\\nDocker: ${env.NEXUS_DOCKER_REGISTRY}\\nJenkins: ${env.BUILD_URL}"}' \
+                        -d '{"chat_id": "486108633", "text": "${emoji} CI/CD Pipeline завершен: ${currentBuild.currentResult}\\\\nВерсия: ${env.PROJECT_VERSION ?: 'N/A'}\\\\nDocker: ${env.NEXUS_DOCKER_REGISTRY}\\\\nJenkins: ${env.BUILD_URL}"}' \
                         https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
                     """
                 } catch (Exception e) {
