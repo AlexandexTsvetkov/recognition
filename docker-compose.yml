@@ -1,8 +1,8 @@
-version: '3.8'
-
+# Убираем version полностью
 services:
+  # Инфраструктурные сервисы
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.3.0
+    image: confluentinc/cp-zookeeper:7.5.0
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -10,22 +10,22 @@ services:
       - "2181:2181"
 
   kafka:
-    image: confluentinc/cp-kafka:7.3.0
+    image: confluentinc/cp-kafka:7.5.0
     depends_on:
       - zookeeper
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_NUM_PARTITIONS: 5
+      KAFKA_NUM_PARTITIONS: 3
       KAFKA_DEFAULT_REPLICATION_FACTOR: 1
-      # Явно отключаем KRaft режим
-      KAFKA_PROCESS_ROLES: ""
 
   postgres:
     image: postgres:15-alpine
@@ -35,10 +35,6 @@ services:
       POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./recognition-request-service/src/main/resources/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
-      - ./recognition-result-service/src/main/resources/schema.sql:/docker-entrypoint-initdb.d/02-schema.sql
 
   minio:
     image: minio/minio:latest
@@ -49,9 +45,78 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     command: server /data --console-address ":9001"
-    volumes:
-      - minio_data:/data
 
-volumes:
-  postgres_data:
-  minio_data:
+  # Бизнес-сервисы
+  request-service:
+    build:
+      context: .
+      dockerfile: recognition-request-service/Dockerfile
+    image: recognition/recognition-request-service:latest
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - DATABASE_URL=r2dbc:postgresql://postgres:5432/recognition
+      - DATABASE_USER=postgres
+      - DATABASE_PASSWORD=postgres
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    depends_on:
+      - postgres
+      - kafka
+
+  processing-service:
+    build:
+      context: .
+      dockerfile: recognition-processing-service/Dockerfile
+    image: recognition/recognition-processing-service:latest
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - STORAGE_ENDPOINT=http://minio:9000
+      - STORAGE_ACCESS_KEY=minioadmin
+      - STORAGE_SECRET_KEY=minioadmin
+      - STORAGE_BUCKET_NAME=recognition-audio
+      - STORAGE_AUDIO_PREFIX=audio/
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    depends_on:
+      - request-service
+      - minio
+      - kafka
+
+  result-service:
+    build:
+      context: .
+      dockerfile: recognition-result-service/Dockerfile
+    image: recognition/recognition-result-service:latest
+    ports:
+      - "8084:8084"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - DATABASE_URL=r2dbc:postgresql://postgres:5432/recognition
+      - DATABASE_USER=postgres
+      - DATABASE_PASSWORD=postgres
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    depends_on:
+      - postgres
+      - kafka
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: recognition-api-gateway/Dockerfile
+    image: recognition/recognition-api-gateway:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - REQUEST_SERVICE_URL=http://request-service:8082
+      - STORAGE_ENDPOINT=http://minio:9000
+      - STORAGE_ACCESS_KEY=minioadmin
+      - STORAGE_SECRET_KEY=minioadmin
+      - STORAGE_BUCKET_NAME=recognition-audio
+      - STORAGE_AUDIO_PREFIX=audio/
+    depends_on:
+      - request-service
+      - minio
+      - result-service
