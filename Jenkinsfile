@@ -589,53 +589,43 @@ echo "Деплой подготовлен в директории: \${DEPLOY_DIR
 
                     sh "chmod +x deploy-to-production.sh"
 
-                    // Генерируем README - ИСПРАВЛЕНО: экранирование обратных кавычек
+                    // Генерируем README - УПРОЩЕННАЯ ВЕРСИЯ без Markdown форматирования
                     writeFile file: 'DEPLOYMENT.md', text: """# Деплой Recognition Microservices
 
 ## Информация о сборке
-- **Версия**: ${env.PROJECT_VERSION}
-- **Дата сборки**: ${new Date()}
-- **Nexus Registry**: ${env.NEXUS_DOCKER_REGISTRY}
-- **Docker Repository**: ${env.NEXUS_DOCKER_REPOSITORY}
+Версия: ${env.PROJECT_VERSION}
+Дата сборки: ${new Date()}
+Nexus Registry: ${env.NEXUS_DOCKER_REGISTRY}
+Docker Repository: ${env.NEXUS_DOCKER_REPOSITORY}
 
 ## Доступные образы
-1. **API Gateway**: `${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}`
-2. **Request Service**: `${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}`
-3. **Processing Service**: `${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}`
-4. **Result Service**: `${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}`
+1. API Gateway: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
+2. Request Service: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
+3. Processing Service: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
+4. Result Service: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
 
 ## Инструкция по деплою
 
-### 1. Подготовка окружения
-\`\`\`bash
-./deploy-to-production.sh
-\`\`\`
+1. Подготовка окружения
+   ./deploy-to-production.sh
 
-### 2. Настройка переменных окружения
-\`\`\`bash
-cd deploy-<timestamp>
-cp .env.example .env
-# Отредактируйте .env файл
-\`\`\`
+2. Настройка переменных окружения
+   cd deploy-<timestamp>
+   cp .env.example .env
+   # Отредактируйте .env файл
 
-### 3. Загрузка образов
-\`\`\`bash
-docker login ${env.NEXUS_DOCKER_REGISTRY}
-docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
-docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
-# ... и так далее для всех сервисов
-\`\`\`
+3. Загрузка образов
+   docker login ${env.NEXUS_DOCKER_REGISTRY}
+   docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
+   docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
+   # ... и так далее для всех сервисов
 
-### 4. Запуск
-\`\`\`bash
-docker-compose up -d
-\`\`\`
+4. Запуск
+   docker-compose up -d
 
-### 5. Проверка
-\`\`\`bash
-docker-compose ps
-curl http://localhost:8080/actuator/health
-\`\`\`
+5. Проверка
+   docker-compose ps
+   curl http://localhost:8080/actuator/health
 
 ## Maven артефакты
 Артефакты доступны в Nexus:
