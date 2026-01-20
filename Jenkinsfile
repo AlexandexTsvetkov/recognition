@@ -205,23 +205,22 @@ pipeline {
             }
         }
 
-         stages {
-                stage('Check Docker') {
-                    steps {
-                        script {
-                            if (!env.DOCKER_AVAILABLE) {
-                                error "❌ Docker не найден!"
-                            }
-                            sh '''
-                                echo "✅ Docker доступен:"
-                                docker --version
-                                echo ""
-                                echo "Docker информация:"
-                                docker info
-                            '''
-                        }
-                    }
-                }
+         stage('Check Docker') {
+                     steps {
+                         script {
+                             if (!env.DOCKER_AVAILABLE) {
+                                 error "❌ Docker не найден!"
+                             }
+                             sh '''
+                                 echo "✅ Docker доступен:"
+                                 docker --version
+                                 echo ""
+                                 echo "Docker информация:"
+                                 docker info
+                             '''
+                         }
+                     }
+                 }
 
         stage('Build Docker Images') {
             steps {
