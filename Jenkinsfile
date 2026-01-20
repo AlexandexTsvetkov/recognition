@@ -48,6 +48,7 @@ pipeline {
                     sh 'mvn package -DskipTests'
                 }
             }
+
             post {
                 always {
                     junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
