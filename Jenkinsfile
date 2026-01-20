@@ -23,6 +23,7 @@ pipeline {
         NEXUS_DOCKER_REGISTRY = '31.186.103.242:8081'
         NEXUS_DOCKER_REPOSITORY = 'docker-hosted'
         DOCKER_IMAGE_PREFIX = 'recognition'
+        DOCKER_AVAILABLE = sh(script: 'command -v docker', returnStatus: true) == 0
     }
 
     stages {
@@ -203,6 +204,24 @@ pipeline {
                 }
             }
         }
+
+         stages {
+                stage('Check Docker') {
+                    steps {
+                        script {
+                            if (!env.DOCKER_AVAILABLE) {
+                                error "❌ Docker не найден!"
+                            }
+                            sh '''
+                                echo "✅ Docker доступен:"
+                                docker --version
+                                echo ""
+                                echo "Docker информация:"
+                                docker info
+                            '''
+                        }
+                    }
+                }
 
         stage('Build Docker Images') {
             steps {
