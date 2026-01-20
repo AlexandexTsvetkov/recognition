@@ -23,7 +23,6 @@ pipeline {
         NEXUS_DOCKER_REGISTRY = '31.186.103.242:8081'
         NEXUS_DOCKER_REPOSITORY = 'docker-hosted'
         DOCKER_IMAGE_PREFIX = 'recognition'
-        DOCKER_AVAILABLE = sh(script: 'command -v docker', returnStatus: true) == 0
     }
 
     stages {
@@ -208,16 +207,15 @@ pipeline {
          stage('Check Docker') {
                      steps {
                          script {
-                             if (!env.DOCKER_AVAILABLE) {
-                                 error "❌ Docker не найден!"
+                             // Проверяем наличие Docker
+                             def dockerCheck = sh(script: 'command -v docker', returnStatus: true)
+                             if (dockerCheck != 0) {
+                                 error "❌ Docker не найден! Установите Docker на Jenkins-агент."
                              }
-                             sh '''
-                                 echo "✅ Docker доступен:"
-                                 docker --version
-                                 echo ""
-                                 echo "Docker информация:"
-                                 docker info
-                             '''
+
+                             echo "✅ Docker доступен:"
+                             sh 'docker --version'
+                             sh 'docker info'
                          }
                      }
                  }
