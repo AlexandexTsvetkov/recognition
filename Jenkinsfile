@@ -21,16 +21,15 @@ pipeline {
         stage('Initialize') {
             steps {
                 script {
-                    // Добавляем timestamp к версии для уникальности
-                    def timestamp = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
                     def baseVersion = sh(script: 'mvn help:evaluate -Dexpression=project.version -q -DforceStdout', returnStdout: true).trim()
 
-                    // Создаем уникальную версию с timestamp
+                    // Используем только версию + номер сборки
                     env.PROJECT_VERSION = baseVersion
-                    env.BUILD_VERSION = "${baseVersion}-${env.BUILD_ID}"
+                    env.BUILD_VERSION = "${baseVersion}-${env.BUILD_NUMBER}"
 
                     echo "Base Version: ${env.PROJECT_VERSION}"
                     echo "Build Version: ${env.BUILD_VERSION}"
+                    echo "Build Number: ${env.BUILD_NUMBER}"
                     echo "Registry: ${env.JIB_IMAGE_PREFIX}"
                 }
             }
@@ -46,7 +45,8 @@ pipeline {
             steps {
                 script {
                     echo "Building and testing..."
-                    sh 'mvn clean test jacoco:report-aggregate'
+                    sh 'mvn clean test'
+                    sh 'mvn jacoco:report-aggregate'
                 }
             }
 
@@ -66,10 +66,10 @@ pipeline {
             }
         }
 
-        stage('Clean Registry if needed') {
+        stage('Check Existing Images') {
             steps {
                 script {
-                    echo "Проверка и очистка предыдущих образов..."
+                    echo "Проверка существующих образов в реестре..."
 
                     withCredentials([
                         usernamePassword(
@@ -79,42 +79,87 @@ pipeline {
                         )
                     ]) {
                         sh '''
-                            # Логинимся в реестр
+                            # Логинимся в реестр для проверки
                             echo "${SELECTEL_PASS}" | docker login ${SELECTEL_REGISTRY} \
                                 -u ${SELECTEL_USER} \
                                 --password-stdin
 
-                            # Проверяем и удаляем образы с тегом 0.0.1-SNAPSHOT если они есть
+                            # Создаем файл для хранения статусов
+                            > /tmp/image_status.txt
+
                             for SERVICE in recognition-api-gateway recognition-request-service recognition-processing-service recognition-result-service; do
-                                echo "Проверяем ${SERVICE}..."
+                                echo ""
+                                echo "Проверяем ${SERVICE}:${BUILD_VERSION}..."
 
                                 # Проверяем существует ли образ в реестре
                                 if curl -s -f -u "${SELECTEL_USER}:${SELECTEL_PASS}" \
-                                    "https://${SELECTEL_REGISTRY}/v2/${SELECTEL_REGISTRY_NAME}/${SERVICE}/tags/list" \
-                                    | grep -q "0.0.1-SNAPSHOT"; then
+                                    "https://${SELECTEL_REGISTRY}/v2/${SELECTEL_REGISTRY_NAME}/${SERVICE}/manifests/${BUILD_VERSION}" \
+                                    -o /dev/null -w "%{http_code}" | grep -q "200"; then
 
-                                    echo "Образ ${SERVICE}:0.0.1-SNAPSHOT найден в реестре"
-                                    echo "Для удаления образа из реестра используйте Selectel CLI или веб-интерфейс"
+                                    echo "✅ Образ ${SERVICE}:${BUILD_VERSION} уже существует в реестре"
+                                    echo "${SERVICE}:EXISTS" >> /tmp/image_status.txt
+
+                                    # Пробуем скачать для дополнительной проверки
+                                    if docker pull ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION} 2>/dev/null; then
+                                        echo "   Образ валиден и может быть скачан"
+                                        docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION} 2>/dev/null || true
+                                    fi
                                 else
-                                    echo "Образ ${SERVICE}:0.0.1-SNAPSHOT не найден в реестре"
+                                    echo "❌ Образ ${SERVICE}:${BUILD_VERSION} не найден в реестре"
+                                    echo "${SERVICE}:NOT_EXISTS" >> /tmp/image_status.txt
                                 fi
 
-                                # Удаляем локальные образы если они есть
-                                docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:0.0.1-SNAPSHOT 2>/dev/null || true
+                                # Очищаем локальные образы
+                                docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION} 2>/dev/null || true
                                 docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:latest 2>/dev/null || true
                             done
 
                             docker logout ${SELECTEL_REGISTRY} || true
+
+                            # Показываем итоговый статус
+                            echo ""
+                            echo "=== ИТОГОВЫЙ СТАТУС ОБРАЗОВ ==="
+                            cat /tmp/image_status.txt
                         '''
+
+                        // Читаем статусы и решаем что делать дальше
+                        def statusText = sh(script: 'cat /tmp/image_status.txt', returnStdout: true).trim()
+                        def allExist = true
+                        def servicesToBuild = []
+
+                        statusText.eachLine { line ->
+                            def parts = line.split(':')
+                            if (parts.size() == 2) {
+                                def service = parts[0]
+                                def status = parts[1]
+
+                                if (status == 'NOT_EXISTS') {
+                                    allExist = false
+                                    servicesToBuild.add(service)
+                                }
+                            }
+                        }
+
+                        if (allExist) {
+                            echo "ВСЕ образы уже существуют в реестре. Пропускаем сборку Docker образов."
+                            env.SKIP_DOCKER_BUILD = 'true'
+                        } else {
+                            echo "Нужно собрать следующие сервисы: ${servicesToBuild}"
+                            env.SKIP_DOCKER_BUILD = 'false'
+                            env.SERVICES_TO_BUILD = servicesToBuild.join(',')
+                        }
                     }
                 }
             }
         }
 
-        stage('Build and Push Docker Images') {
+        stage('Build and Push with Jib') {
+            when {
+                expression { env.SKIP_DOCKER_BUILD == 'false' }
+            }
             steps {
                 script {
-                    echo "Сборка и загрузка Docker образов..."
+                    echo "Сборка и загрузка образов через Jib..."
 
                     withCredentials([
                         usernamePassword(
@@ -123,74 +168,87 @@ pipeline {
                             passwordVariable: 'SELECTEL_PASS'
                         )
                     ]) {
-                        def services = [
+                        def allServices = [
                             'recognition-api-gateway': '8080',
                             'recognition-request-service': '8082',
                             'recognition-processing-service': '8083',
                             'recognition-result-service': '8084'
                         ]
 
-                        services.each { serviceName, port ->
-                            dir(serviceName) {
-                                echo "Обрабатываем ${serviceName}..."
+                        // Определяем какие сервисы нужно собрать
+                        def servicesToBuild = allServices
+                        if (env.SERVICES_TO_BUILD) {
+                            def neededServices = env.SERVICES_TO_BUILD.split(',')
+                            servicesToBuild = allServices.findAll { serviceName, port ->
+                                neededServices.contains(serviceName)
+                            }
+                            echo "Будем собирать только: ${servicesToBuild.keySet()}"
+                        }
 
-                                // СПОСОБ 1: Используем Jib с уникальным тегом
+                        servicesToBuild.each { serviceName, port ->
+                            dir(serviceName) {
+                                echo "Собираем ${serviceName}:${env.BUILD_VERSION}..."
+
+                                // Метод 1: Прямая загрузка через Jib с проверкой skipExistingImages
                                 try {
-                                    // Используем BUILD_VERSION вместо PROJECT_VERSION для уникальности
                                     sh """
                                         mvn compile jib:build \
                                             -DskipTests \
                                             -Djib.from.image=eclipse-temurin:21-jre-alpine \
-                                            -Djib.to.image=${env.JIB_IMAGE_PREFIX}/${serviceName} \
+                                            -Djib.to.image=${env.JIB_IMAGE_PREFIX}/${serviceName}:${env.BUILD_VERSION} \
                                             -Djib.to.auth.username='${SELECTEL_USER}' \
                                             -Djib.to.auth.password='${SELECTEL_PASS}' \
-                                            -Djib.to.tags='${env.BUILD_VERSION}' \
                                             -Djib.container.ports=${port} \
-                                            -Djib.console=plain
+                                            -Djib.console=plain \
+                                            -Djib.to.tags='${env.BUILD_VERSION}' \
+                                            -Djib.skipExistingImages=true \
+                                            -Ddocker.registry=${env.SELECTEL_REGISTRY} \
+                                            -Ddocker.repository=${env.SELECTEL_REGISTRY_NAME} \
+                                            -Ddocker.image.tag=${env.BUILD_VERSION}
                                     """
 
                                     echo "✅ Успешно: ${serviceName}:${env.BUILD_VERSION}"
 
                                 } catch (Exception e) {
-                                    echo "Ошибка с Jib: ${e.message}"
-                                    echo "Пробуем Docker CLI метод..."
+                                    echo "Ошибка с прямым Jib: ${e.message}"
+                                    echo "Пробуем сборку локально + ручной push (с проверкой)..."
 
-                                    // СПОСОБ 2: Docker CLI fallback
+                                    // Метод 2: Сборка локально через Jib + ручной push с проверкой
                                     sh '''
-                                        # Собираем JAR
-                                        mvn clean package -DskipTests
+                                        # Собираем локальный Docker образ через Jib
+                                        mvn compile jib:dockerBuild \
+                                            -DskipTests \
+                                            -Djib.from.image=eclipse-temurin:21-jre-alpine \
+                                            -Djib.to.image=${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION} \
+                                            -Djib.container.ports=''' + port + ''' \
+                                            -Djib.console=plain
 
-                                        # Создаем Dockerfile
-                                        cat > Dockerfile << EOF
-                                        FROM eclipse-temurin:21-jre-alpine
-                                        COPY target/*.jar app.jar
-                                        EXPOSE ''' + port + '''
-                                        ENTRYPOINT ["java", "-jar", "/app.jar"]
-                                        EOF
+                                        # Проверяем что образ создан
+                                        echo "Собранные образы:"
+                                        docker images | grep ${SERVICE_NAME} || true
 
                                         # Логинимся в реестр
                                         echo "${SELECTEL_PASS}" | docker login ${SELECTEL_REGISTRY} \
                                             -u ${SELECTEL_USER} \
                                             --password-stdin
 
-                                        # Собираем образ
-                                        docker build -t ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION} .
+                                        # Проверяем не существует ли уже образ перед загрузкой
+                                        echo "Проверяем существование образа перед загрузкой..."
+                                        if curl -s -f -u "${SELECTEL_USER}:${SELECTEL_PASS}" \
+                                            "https://${SELECTEL_REGISTRY}/v2/${SELECTEL_REGISTRY_NAME}/${SERVICE_NAME}/manifests/${BUILD_VERSION}" \
+                                            -o /dev/null -w "%{http_code}" | grep -q "200"; then
 
-                                        # Загружаем в реестр
-                                        docker push ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION}
-
-                                        # Также помечаем как latest (опционально)
-                                        docker tag ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION} ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:latest
-                                        docker push ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:latest
+                                            echo "⚠️ Образ уже существует, пропускаем загрузку"
+                                        else
+                                            echo "Загружаем новый образ..."
+                                            docker push ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION}
+                                            echo "✅ Успешно загружен"
+                                        fi
 
                                         # Очищаем локальные образы
-                                        docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION} || true
-                                        docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:latest || true
-
+                                        docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION} 2>/dev/null || true
                                         docker logout ${SELECTEL_REGISTRY} || true
                                     '''
-
-                                    echo "✅ Успешно через Docker CLI: ${serviceName}:${env.BUILD_VERSION}"
                                 }
                             }
                         }
@@ -228,10 +286,11 @@ pipeline {
 
                                     # Получаем информацию об образе
                                     echo "Информация об образе:"
-                                    docker inspect ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION} | grep -E "Created|Size"
+                                    docker inspect ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION} | \
+                                        grep -E '"Created"|"Size"' | head -2
 
                                     # Удаляем локальную копию
-                                    docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION}
+                                    docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION} 2>/dev/null || true
                                 else
                                     echo "❌ НЕ НАЙДЕНО: ${SERVICE}:${BUILD_VERSION}"
                                 fi
@@ -254,17 +313,22 @@ pipeline {
                     def emoji = currentBuild.currentResult == 'SUCCESS' ? '✅' :
                                currentBuild.currentResult == 'UNSTABLE' ? '⚠️' : '❌'
 
+                    def skipMessage = env.SKIP_DOCKER_BUILD == 'true' ? "\nDocker сборка пропущена (образы уже существуют)" : ""
+
                     def message = """
 ${emoji} Recognition CI/CD: ${currentBuild.currentResult}
 Версия: ${env.PROJECT_VERSION}
 Версия сборки: ${env.BUILD_VERSION}
-Jenkins: ${env.BUILD_URL}
+Jenkins: ${env.BUILD_URL}${skipMessage}
                     """.trim()
+
+                    // Экранируем для JSON
+                    def escapedMessage = message.replace("\n", "\\\\n").replace('"', '\\"')
 
                     sh """
                         curl -s -X POST \
                         -H 'Content-Type: application/json' \
-                        -d '{"chat_id": "486108633", "text": "${message}"}' \
+                        -d '{"chat_id": "486108633", "text": "${escapedMessage}"}' \
                         https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage || true
                     """
                 } catch (Exception e) {
