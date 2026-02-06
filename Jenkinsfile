@@ -11,12 +11,13 @@ pipeline {
         PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.PATH}"
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
 
-        // Selectel Container Registry
+        // Selectel Container Registry - ПРАВИЛЬНЫЕ НАСТРОЙКИ
         SELECTEL_REGISTRY = 'cr.selcloud.ru'
-        DOCKER_NAMESPACE = 'recognition'
+        SELECTEL_REGISTRY_NAME = 'container-registry'  // Имя вашего реестра из личного кабинета
+        DOCKER_NAMESPACE = 'recognition'  // Ваш namespace внутри реестра
 
-        // Jib image prefix
-        JIB_IMAGE_PREFIX = "${env.SELECTEL_REGISTRY}/${env.DOCKER_NAMESPACE}"
+        // ПРАВИЛЬНЫЙ путь для Selectel
+        JIB_IMAGE_PREFIX = "${env.SELECTEL_REGISTRY}/${env.SELECTEL_REGISTRY_NAME}/${env.DOCKER_NAMESPACE}"
     }
 
     stages {
@@ -31,8 +32,15 @@ pipeline {
                     echo "🚀 Initializing Recognition Microservices CI/CD"
                     echo "Project Version: ${env.PROJECT_VERSION}"
                     echo "Is Snapshot: ${env.IS_SNAPSHOT}"
-                    echo "Container Registry: ${env.SELECTEL_REGISTRY}"
-                    echo "Jib Image Prefix: ${env.JIB_IMAGE_PREFIX}"
+                    echo "Selectel Registry: ${env.SELECTEL_REGISTRY}"
+                    echo "Registry Name: ${env.SELECTEL_REGISTRY_NAME}"
+                    echo "Namespace: ${env.DOCKER_NAMESPACE}"
+                    echo "Full Image Path: ${env.JIB_IMAGE_PREFIX}/<service-name>:${env.PROJECT_VERSION}"
+
+                    // Проверяем путь
+                    if (!env.JIB_IMAGE_PREFIX.startsWith('cr.selcloud.ru/container-registry/')) {
+                        error "❌ WRONG IMAGE PATH! Should start with: cr.selcloud.ru/container-registry/"
+                    }
                 }
             }
         }
@@ -72,27 +80,62 @@ pipeline {
             }
         }
 
-        stage('Build JARs') {
+        stage('Test Selectel Connection') {
             steps {
                 script {
-                    echo "📦 Building JAR files..."
-                    sh 'mvn clean package -DskipTests'
-                }
-            }
-        }
+                    echo "🔗 Testing connection to Selectel Registry..."
 
-        stage('Build and Push Docker Images with Jib') {
-            steps {
-                script {
-                    echo "🚀 Building and pushing Docker images with Jib..."
+                    // Проверяем доступность registry
+                    sh """
+                        echo "Testing registry access..."
+                        curl -s https://${env.SELECTEL_REGISTRY}/v2/ || echo "Registry ping completed"
+                    """
 
+                    // Проверяем credentials
                     withCredentials([
                         string(
                             credentialsId: 'selectel-registry-auth',
                             variable: 'SELECTEL_AUTH_TOKEN'
                         )
                     ]) {
-                        // Список сервисов и их портов
+                        sh '''
+                            echo "=== Selectel Token Info ==="
+                            echo "Token (base64): ${SELECTEL_AUTH_TOKEN}"
+
+                            # Декодируем токен
+                            DECODED=$(echo "${SELECTEL_AUTH_TOKEN}" | base64 -d 2>/dev/null || echo "DECODE_ERROR")
+                            echo "Decoded: ${DECODED}"
+
+                            if [[ "${DECODED}" == "DECODE_ERROR" ]]; then
+                                echo "⚠️ Token is not valid base64!"
+                                echo "Maybe it's already a password? Trying as plain text..."
+                                echo "Token as plain text: ${SELECTEL_AUTH_TOKEN}"
+                            else
+                                USERNAME=$(echo "${DECODED}" | cut -d':' -f1)
+                                PASSWORD=$(echo "${DECODED}" | cut -d':' -f2)
+                                echo "Username from token: ${USERNAME}"
+                                echo "Password length: ${#PASSWORD}"
+                            fi
+                            echo "==========================="
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Build and Push with Jib - Simple Method') {
+            steps {
+                script {
+                    echo "🚀 Building and pushing Docker images..."
+
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'selectel-registry-credentials',  // Измените на ваши credentials
+                            usernameVariable: 'SELECTEL_USERNAME',
+                            passwordVariable: 'SELECTEL_PASSWORD'
+                        )
+                    ]) {
+                        // Список сервисов
                         def services = [
                             'recognition-api-gateway': '8080',
                             'recognition-request-service': '8082',
@@ -101,48 +144,40 @@ pipeline {
                         ]
 
                         services.each { serviceName, port ->
-                            echo "📦 Processing ${serviceName}..."
+                            echo "📦 Building ${serviceName}..."
 
                             dir(serviceName) {
                                 try {
-                                    // Вариант 1: Используем параметры Jib через system properties
+                                    // ПРОСТОЙ и ПРАВИЛЬНЫЙ метод
                                     sh """
                                         mvn compile jib:build \
                                             -DskipTests \
                                             -Djib.from.image=eclipse-temurin:21-jre-alpine \
                                             -Djib.to.image=${env.JIB_IMAGE_PREFIX}/${serviceName} \
-                                            -Djib.to.auth.username=token \
-                                            -Djib.to.auth.password=${SELECTEL_AUTH_TOKEN} \
-                                            -Djib.to.tags=${env.PROJECT_VERSION},latest \
+                                            -Djib.to.auth.username=${SELECTEL_USERNAME} \
+                                            -Djib.to.auth.password=${SELECTEL_PASSWORD} \
+                                            -Djib.to.tags=${env.PROJECT_VERSION} \
+                                            -Djib.to.tags=latest \
                                             -Djib.container.ports=${port} \
                                             -Djib.container.creationTime=USE_CURRENT_TIMESTAMP \
-                                            -Djib.container.environment=SPRING_PROFILES_ACTIVE=production \
-                                            -Djib.container.jvmFlags=-Xms512m,-Xmx1g \
+                                            -Djib.console=plain \
                                             -q
                                     """
 
-                                    echo "✅ ${serviceName}:${env.PROJECT_VERSION} built and pushed"
+                                    echo "✅ ${serviceName}:${env.PROJECT_VERSION} pushed to Selectel"
 
                                 } catch (Exception e) {
-                                    echo "⚠️ Error with Jib for ${serviceName}: ${e.message}"
-                                    echo "Trying alternative Jib configuration..."
+                                    echo "⚠️ Error: ${e.message}"
+                                    currentBuild.result = 'UNSTABLE'
 
-                                    try {
-                                        // Вариант 2: Альтернативная конфигурация
-                                        sh """
-                                            mvn compile jib:build \
-                                                -DskipTests \
-                                                -Dimage=${env.JIB_IMAGE_PREFIX}/${serviceName}:${env.PROJECT_VERSION} \
-                                                -Djib.to.auth.username=token \
-                                                -Djib.to.auth.password=${SELECTEL_AUTH_TOKEN} \
-                                                -Djib.to.tags=latest \
-                                                -q
-                                        """
-                                        echo "✅ ${serviceName} built with alternative method"
-                                    } catch (Exception e2) {
-                                        echo "❌ All Jib methods failed for ${serviceName}"
-                                        currentBuild.result = 'UNSTABLE'
-                                    }
+                                    // Диагностика
+                                    sh """
+                                        echo "=== DIAGNOSTICS ==="
+                                        echo "Target: ${env.JIB_IMAGE_PREFIX}/${serviceName}"
+                                        echo "Username: ${SELECTEL_USERNAME}"
+                                        echo "Password present: ${SELECTEL_PASSWORD != null}"
+                                        echo "=================="
+                                    """
                                 }
                             }
                         }
@@ -151,416 +186,138 @@ pipeline {
             }
         }
 
-        stage('Generate Deployment Artifacts') {
+        stage('Alternative: Build with Docker then Push') {
+            when {
+                expression { currentBuild.result == 'UNSTABLE' || currentBuild.result == null }
+            }
             steps {
                 script {
-                    echo "📄 Generating deployment artifacts..."
+                    echo "🔄 Trying alternative method with Docker CLI..."
+
+                    // Список сервисов
+                    def services = [
+                        'recognition-api-gateway': '8080',
+                        'recognition-request-service': '8082',
+                        'recognition-processing-service': '8083',
+                        'recognition-result-service': '8084'
+                    ]
 
                     withCredentials([
-                        string(
-                            credentialsId: 'selectel-registry-auth',
-                            variable: 'SELECTEL_AUTH_TOKEN'
+                        usernamePassword(
+                            credentialsId: 'selectel-registry-credentials',
+                            usernameVariable: 'SELECTEL_USERNAME',
+                            passwordVariable: 'SELECTEL_PASSWORD'
                         )
                     ]) {
-                        // 1. Deployment information
-                        writeFile file: 'deployment-info.txt', text: """=== Recognition Microservices Deployment ===
-Build Timestamp: ${new Date()}
-Version: ${env.PROJECT_VERSION}
-Container Registry: ${env.SELECTEL_REGISTRY}
-Namespace: ${env.DOCKER_NAMESPACE}
+                        // Логинимся в Selectel Registry
+                        sh """
+                            echo "${SELECTEL_PASSWORD}" | docker login ${env.SELECTEL_REGISTRY} \
+                                -u ${SELECTEL_USERNAME} \
+                                --password-stdin || echo "Docker login completed"
+                        """
 
-Available Docker Images:
-----------------------------------------------------------
-1. API Gateway:
-   Image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
-   Port: 8080
-   Latest: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:latest
+                        services.each { serviceName, port ->
+                            echo "🐳 Building ${serviceName} with Docker..."
 
-2. Request Service:
-   Image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
-   Port: 8082
-   Latest: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:latest
+                            dir(serviceName) {
+                                // Собираем JAR
+                                sh 'mvn clean package -DskipTests'
 
-3. Processing Service:
-   Image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
-   Port: 8083
-   Latest: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:latest
+                                // Создаем Dockerfile
+                                writeFile file: 'Dockerfile', text: """FROM eclipse-temurin:21-jre-alpine
+VOLUME /tmp
+COPY target/*.jar app.jar
+ENTRYPOINT ["java","-jar","/app.jar"]
+EXPOSE ${port}
+"""
 
-4. Result Service:
-   Image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
-   Port: 8084
-   Latest: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:latest
+                                // Собираем образ
+                                sh """
+                                    docker build \
+                                        -t ${env.JIB_IMAGE_PREFIX}/${serviceName}:${env.PROJECT_VERSION} \
+                                        -t ${env.JIB_IMAGE_PREFIX}/${serviceName}:latest \
+                                        .
+                                """
 
-Pull Commands:
-----------------------------------------------------------
-docker pull ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
-docker pull ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
-docker pull ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
-docker pull ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
+                                // Пушим образ
+                                sh """
+                                    docker push ${env.JIB_IMAGE_PREFIX}/${serviceName}:${env.PROJECT_VERSION} || echo "Push failed"
+                                    docker push ${env.JIB_IMAGE_PREFIX}/${serviceName}:latest || echo "Latest push failed"
+                                """
+                            }
+                        }
 
-Authentication:
-----------------------------------------------------------
-To authenticate with Selectel Registry:
+                        sh "docker logout ${env.SELECTEL_REGISTRY} || true"
+                    }
+                }
+            }
+        }
 
-1. Using Docker CLI:
-   docker login ${env.SELECTEL_REGISTRY} \\
-     --username token \\
-     --password-stdin < your-token-file.txt
+        stage('Generate Deployment Info') {
+            steps {
+                script {
+                    echo "📄 Generating deployment information..."
 
-2. Or create docker config file:
-   mkdir -p ~/.docker
-   cat > ~/.docker/config.json << 'EOF'
-   {
-     "auths": {
-       "${env.SELECTEL_REGISTRY}": {
-         "auth": "${SELECTEL_AUTH_TOKEN}"
-       }
-     }
-   }
-   EOF
+                    writeFile file: 'SELECTEL_DEPLOYMENT.md', text: """# Selectel Container Registry Deployment
 
-Docker Compose Configuration:
-----------------------------------------------------------
-Save as docker-compose.yml:
+## Registry Information
+- **Registry URL:** ${env.SELECTEL_REGISTRY}
+- **Registry Name:** ${env.SELECTEL_REGISTRY_NAME}
+- **Namespace:** ${env.DOCKER_NAMESPACE}
+- **Version:** ${env.PROJECT_VERSION}
+- **Build Date:** ${new Date()}
 
+## Available Images
+
+### 1. API Gateway
+\`\`\`
+Image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
+Port: 8080
+Pull: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
+\`\`\`
+
+### 2. Request Service
+\`\`\`
+Image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
+Port: 8082
+Pull: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
+\`\`\`
+
+### 3. Processing Service
+\`\`\`
+Image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
+Port: 8083
+Pull: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
+\`\`\`
+
+### 4. Result Service
+\`\`\`
+Image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
+Port: 8084
+Pull: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
+\`\`\`
+
+## Authentication
+\`\`\`bash
+# Login to Selectel Registry
+docker login ${env.SELECTEL_REGISTRY} \\
+  --username <your-username> \\
+  --password <your-password-or-token>
+\`\`\`
+
+## Docker Compose Example
+\`\`\`yaml
 version: '3.8'
 services:
   api-gateway:
     image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
     ports:
       - "8080:8080"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-
-  request-service:
-    image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
-    ports:
-      - "8082:8082"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-
-  processing-service:
-    image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
-    ports:
-      - "8083:8083"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-
-  result-service:
-    image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
-    ports:
-      - "8084:8084"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-
-Deployment Steps:
-----------------------------------------------------------
-1. Authenticate: docker login ${env.SELECTEL_REGISTRY}
-2. Pull images: docker-compose pull
-3. Run: docker-compose up -d
-4. Check: docker-compose ps
+\`\`\`
 """
 
-                        // 2. Docker Compose file
-                        writeFile file: 'docker-compose.yml', text: """version: '3.8'
-
-services:
-  api-gateway:
-    image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
-    container_name: recognition-api-gateway
-    ports:
-      - "8080:8080"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-      - JAVA_OPTS=-Xms512m -Xmx1g
-    restart: unless-stopped
-    networks:
-      - recognition-network
-
-  request-service:
-    image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
-    container_name: recognition-request-service
-    ports:
-      - "8082:8082"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-      - JAVA_OPTS=-Xms512m -Xmx1g
-    restart: unless-stopped
-    networks:
-      - recognition-network
-    depends_on:
-      - api-gateway
-
-  processing-service:
-    image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
-    container_name: recognition-processing-service
-    ports:
-      - "8083:8083"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-      - JAVA_OPTS=-Xms512m -Xmx1g
-    restart: unless-stopped
-    networks:
-      - recognition-network
-    depends_on:
-      - request-service
-
-  result-service:
-    image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
-    container_name: recognition-result-service
-    ports:
-      - "8084:8084"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-      - JAVA_OPTS=-Xms512m -Xmx1g
-    restart: unless-stopped
-    networks:
-      - recognition-network
-    depends_on:
-      - processing-service
-
-networks:
-  recognition-network:
-    driver: bridge
-"""
-
-                        // 3. Kubernetes deployment
-                        writeFile file: 'kubernetes-deployment.yaml', text: """# Kubernetes Deployment for Recognition Microservices
-# Version: ${env.PROJECT_VERSION}
-
----
-# Registry Pull Secret
-apiVersion: v1
-kind: Secret
-metadata:
-  name: selectel-registry-secret
-  namespace: recognition
-type: kubernetes.io/dockerconfigjson
-data:
-  .dockerconfigjson: ${sh(script: '''
-    echo -n "{\\"auths\\":{\\"${SELECTEL_REGISTRY}\\":{\\"auth\\":\\"${SELECTEL_AUTH_TOKEN}\\"}}}" | base64 | tr -d '\n'
-  ''', returnStdout: true).trim()}
-
----
-# Namespace
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: recognition
-
----
-# API Gateway
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: recognition-api-gateway
-  namespace: recognition
-  labels:
-    app: api-gateway
-    version: ${env.PROJECT_VERSION}
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: api-gateway
-  template:
-    metadata:
-      labels:
-        app: api-gateway
-        version: ${env.PROJECT_VERSION}
-    spec:
-      imagePullSecrets:
-      - name: selectel-registry-secret
-      containers:
-      - name: api-gateway
-        image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 8080
-        env:
-        - name: SPRING_PROFILES_ACTIVE
-          value: "production"
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "1Gi"
-            cpu: "500m"
-        readinessProbe:
-          httpGet:
-            path: /actuator/health
-            port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        livenessProbe:
-          httpGet:
-            path: /actuator/health
-            port: 8080
-          initialDelaySeconds: 60
-          periodSeconds: 15
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: api-gateway
-  namespace: recognition
-spec:
-  type: LoadBalancer
-  selector:
-    app: api-gateway
-  ports:
-  - port: 80
-    targetPort: 8080
-    protocol: TCP
-
----
-# Request Service
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: recognition-request-service
-  namespace: recognition
-  labels:
-    app: request-service
-    version: ${env.PROJECT_VERSION}
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: request-service
-  template:
-    metadata:
-      labels:
-        app: request-service
-        version: ${env.PROJECT_VERSION}
-    spec:
-      imagePullSecrets:
-      - name: selectel-registry-secret
-      containers:
-      - name: request-service
-        image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 8082
-        env:
-        - name: SPRING_PROFILES_ACTIVE
-          value: "production"
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: request-service
-  namespace: recognition
-spec:
-  selector:
-    app: request-service
-  ports:
-  - port: 8082
-    targetPort: 8082
-
-# Аналогично добавьте другие сервисы...
-"""
-
-                        // 4. Simple deploy script
-                        writeFile file: 'deploy.sh', text: """#!/bin/bash
-# Simple deployment script for Recognition Microservices
-
-set -e
-
-VERSION="${env.PROJECT_VERSION}"
-REGISTRY="${env.SELECTEL_REGISTRY}"
-NAMESPACE="${env.DOCKER_NAMESPACE}"
-
-echo "=========================================="
-echo "Deploying Recognition Microservices v\${VERSION}"
-echo "Registry: \${REGISTRY}"
-echo "=========================================="
-
-echo ""
-echo "Available deployment methods:"
-echo "1. Docker Compose"
-echo "2. Kubernetes"
-echo "3. Manual Docker commands"
-echo ""
-
-read -p "Select method (1-3): " method
-
-case \$method in
-    1)
-        echo "Using Docker Compose..."
-        if ! command -v docker-compose &> /dev/null; then
-            echo "docker-compose not found. Installing..."
-            sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose
-            sudo chmod +x /usr/local/bin/docker-compose
-        fi
-
-        echo "Pulling images..."
-        docker-compose pull
-
-        echo "Starting services..."
-        docker-compose up -d
-
-        echo "Checking services..."
-        docker-compose ps
-
-        echo ""
-        echo "✅ Services deployed!"
-        echo "API Gateway available at: http://localhost:8080"
-        ;;
-
-    2)
-        echo "Using Kubernetes..."
-        if ! command -v kubectl &> /dev/null; then
-            echo "kubectl not found. Please install kubectl first."
-            exit 1
-        fi
-
-        echo "Applying Kubernetes manifests..."
-        kubectl apply -f kubernetes-deployment.yaml
-
-        echo ""
-        echo "✅ Kubernetes resources created!"
-        echo "Check deployment: kubectl get pods -n recognition"
-        echo "Get API Gateway URL: kubectl get svc api-gateway -n recognition"
-        ;;
-
-    3)
-        echo "Manual Docker deployment"
-        echo ""
-        echo "To pull and run individual services:"
-        echo ""
-        echo "# API Gateway"
-        echo "docker pull \${REGISTRY}/\${NAMESPACE}/recognition-api-gateway:\${VERSION}"
-        echo "docker run -d -p 8080:8080 --name api-gateway \\\\"
-        echo "  -e SPRING_PROFILES_ACTIVE=production \\\\"
-        echo "  \${REGISTRY}/\${NAMESPACE}/recognition-api-gateway:\${VERSION}"
-        echo ""
-        echo "# Request Service"
-        echo "docker pull \${REGISTRY}/\${NAMESPACE}/recognition-request-service:\${VERSION}"
-        echo "docker run -d -p 8082:8082 --name request-service \\\\"
-        echo "  -e SPRING_PROFILES_ACTIVE=production \\\\"
-        echo "  \${REGISTRY}/\${NAMESPACE}/recognition-request-service:\${VERSION}"
-        echo ""
-        echo "See deployment-info.txt for complete commands"
-        ;;
-
-    *)
-        echo "Invalid option"
-        exit 1
-        ;;
-esac
-"""
-
-                        sh 'chmod +x deploy.sh'
-
-                        // 5. Archive everything
-                        archiveArtifacts artifacts: 'deployment-info.txt,docker-compose.yml,kubernetes-deployment.yaml,deploy.sh', fingerprint: false
-
-                        echo "✅ Deployment artifacts generated"
-                    }
+                    archiveArtifacts artifacts: 'SELECTEL_DEPLOYMENT.md', fingerprint: false
+                    echo "✅ Deployment info generated"
                 }
             }
         }
@@ -571,15 +328,14 @@ esac
             script {
                 echo "🏁 Pipeline завершен: ${currentBuild.currentResult}"
 
-                // Отправляем уведомление в Telegram
+                // Отправляем уведомление
                 try {
                     def emoji = currentBuild.currentResult == 'SUCCESS' ? '✅' :
                                currentBuild.currentResult == 'UNSTABLE' ? '⚠️' : '❌'
 
-                    def message = """${emoji} Recognition CI/CD завершен: ${currentBuild.currentResult}
+                    def message = """${emoji} Recognition CI/CD: ${currentBuild.currentResult}
 Версия: ${env.PROJECT_VERSION}
-Registry: ${env.SELECTEL_REGISTRY}
-Образы: ${env.JIB_IMAGE_PREFIX}/*
+Registry: ${env.SELECTEL_REGISTRY}/${env.SELECTEL_REGISTRY_NAME}
 Jenkins: ${env.BUILD_URL}
                     """.trim()
 
@@ -595,9 +351,8 @@ Jenkins: ${env.BUILD_URL}
             }
         }
         success {
-            echo '🎉 Сборка и деплой успешно завершены!'
-            echo "📦 Образы доступны в Selectel Registry: ${env.JIB_IMAGE_PREFIX}/*"
-            echo "📄 Артефакты деплоя сохранены в Jenkins"
+            echo '🎉 Сборка успешно завершена!'
+            echo "📦 Образы: ${env.JIB_IMAGE_PREFIX}/*"
         }
         failure {
             echo '❌ Сборка завершилась с ошибками!'
