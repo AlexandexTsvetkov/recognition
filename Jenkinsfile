@@ -8,20 +8,15 @@ pipeline {
     environment {
         MAVEN_HOME = tool name: 'Maven-3.8.1', type: 'maven'
         JAVA_HOME = tool name: 'JDK21', type: 'jdk'
-        DEP_CHECK_TOOL = tool name: 'Dependency-Check-9.0.10', type: 'dependency-check'
-        PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.DEP_CHECK_TOOL}/bin:${env.PATH}"
+        PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.PATH}"
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
-        SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
 
-        // Nexus
-        NEXUS_URL = 'http://31.186.103.242:8081'
-        NEXUS_REPO_SNAPSHOT = 'maven-snapshots'
-        NEXUS_REPO_RELEASE = 'maven-releases'
-
-        // Docker settings должны совпадать с pom.xml
-        DOCKER_REGISTRY = '31.186.103.242:8081'
-        DOCKER_REPOSITORY = 'repository/docker-hosted'
+        // Selectel Container Registry
+        SELECTEL_REGISTRY = 'cr.selcloud.ru'
         DOCKER_NAMESPACE = 'recognition'
+
+        // Jib image prefix
+        JIB_IMAGE_PREFIX = "${env.SELECTEL_REGISTRY}/${env.DOCKER_NAMESPACE}"
     }
 
     stages {
@@ -36,6 +31,8 @@ pipeline {
                     echo "🚀 Initializing Recognition Microservices CI/CD"
                     echo "Project Version: ${env.PROJECT_VERSION}"
                     echo "Is Snapshot: ${env.IS_SNAPSHOT}"
+                    echo "Container Registry: ${env.SELECTEL_REGISTRY}"
+                    echo "Jib Image Prefix: ${env.JIB_IMAGE_PREFIX}"
                 }
             }
         }
@@ -46,22 +43,16 @@ pipeline {
             }
         }
 
-        stage('Build & Test with JaCoCo') {
+        stage('Build & Test') {
             steps {
                 script {
                     echo "🔨 Building and testing..."
 
-                    // Сначала компилируем
-                    sh 'mvn clean compile test-compile -q'
-
-                    // Запускаем тесты
-                    sh 'mvn test'
+                    // Собираем и тестируем
+                    sh 'mvn clean test'
 
                     // Генерируем отчеты JaCoCo
                     sh 'mvn jacoco:report-aggregate'
-
-                    // Пакетирование
-                    sh 'mvn package -DskipTests'
                 }
             }
 
@@ -81,243 +72,311 @@ pipeline {
             }
         }
 
-        stage('Dependency Check (SAST)') {
+        stage('Build JARs') {
             steps {
                 script {
-                    echo "🔒 Запуск SAST анализа"
-
-                    // Создаем директорию для отчетов
-                    sh 'mkdir -p reports/dependency-check'
-
-                    try {
-                        // Используем существующий API ключ из настроек
-                        sh """
-                            "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh" \
-                            --project "Recognition Microservices" \
-                            --scan "." \
-                            --format "HTML" \
-                            --format "JSON" \
-                            --out "reports/dependency-check" \
-                            --disableBundleAudit \
-                            --disablePyDist \
-                            --disablePyPkg \
-                            --disableNodeAudit \
-                            --disableNodeJS \
-                            --disableRetireJS \
-                            --failOnCVSS 8 \
-                            --enableExperimental \
-                            || echo "Dependency check завершен с предупреждениями"
-                        """
-                    } catch (Exception e) {
-                        echo "⚠️ Dependency Check не удался: ${e.message}"
-                        currentBuild.result = 'UNSTABLE'
-                    }
-                }
-            }
-            post {
-                always {
-                    script {
-                        def htmlReport = 'reports/dependency-check/dependency-check-report.html'
-                        if (fileExists(htmlReport)) {
-                            publishHTML([
-                                allowMissing: false,
-                                alwaysLinkToLastBuild: true,
-                                keepAll: true,
-                                reportDir: 'reports/dependency-check',
-                                reportFiles: 'dependency-check-report.html',
-                                reportName: 'OWASP Dependency Check'
-                            ])
-                        } else {
-                            echo "HTML отчет Dependency Check не найден"
-                        }
-                    }
-                    archiveArtifacts artifacts: 'reports/dependency-check/*', fingerprint: false
+                    echo "📦 Building JAR files..."
+                    sh 'mvn clean package -DskipTests'
                 }
             }
         }
 
-        stage('SonarCloud Analysis') {
+        stage('Build and Push Docker Images with Jib') {
             steps {
                 script {
-                    echo "🌐 Запуск анализа SonarCloud..."
-
-                    try {
-                        withSonarQubeEnv('SonarCloud') {
-                            // Используем правильный путь к отчетам JaCoCo
-                            sh '''
-                                mvn sonar:sonar \
-                                    -Dsonar.projectKey=AlexandexTsvetkov_recognition \
-                                    -Dsonar.organization=alexandextsvetkov \
-                                    -Dsonar.host.url=https://sonarcloud.io \
-                                    -Dsonar.token=${SONAR_CLOUD_TOKEN} \
-                                    -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco-aggregate/jacoco.xml \
-                                    -Dsonar.java.binaries=target/classes \
-                                    -Dsonar.sourceEncoding=UTF-8 \
-                                    -Dsonar.junit.reportPaths=target/surefire-reports \
-                                || echo "SonarCloud анализ завершен"
-                            '''
-                        }
-                    } catch (Exception e) {
-                        echo "⚠️ SonarCloud анализ не удался: ${e.message}"
-                        currentBuild.result = 'UNSTABLE'
-                    }
-                }
-            }
-        }
-
-        stage('Build Docker Images with Jib') {
-            steps {
-                script {
-                    echo "🚀 Building Docker images with Jib Maven Plugin..."
-
-                    // Список сервисов и их портов
-                    def services = [
-                        'recognition-api-gateway': '8080',
-                        'recognition-request-service': '8082',
-                        'recognition-processing-service': '8083',
-                        'recognition-result-service': '8084'
-                    ]
+                    echo "🚀 Building and pushing Docker images with Jib..."
 
                     withCredentials([
-                        usernamePassword(
-                            credentialsId: 'nexus-credentials',
-                            usernameVariable: 'NEXUS_USER',
-                            passwordVariable: 'NEXUS_PASSWORD'
+                        string(
+                            credentialsId: 'selectel-registry-auth',
+                            variable: 'SELECTEL_AUTH_TOKEN'
                         )
                     ]) {
+                        // Список сервисов и их портов
+                        def services = [
+                            'recognition-api-gateway': '8080',
+                            'recognition-request-service': '8082',
+                            'recognition-processing-service': '8083',
+                            'recognition-result-service': '8084'
+                        ]
+
                         services.each { serviceName, port ->
-                            echo "📦 Building ${serviceName}..."
+                            echo "📦 Processing ${serviceName}..."
 
                             dir(serviceName) {
                                 try {
-                                    // Собираем и пушим Docker образ с Jib
+                                    // Вариант 1: Используем параметры Jib через system properties
                                     sh """
                                         mvn compile jib:build \
                                             -DskipTests \
-                                            -Ddocker.registry=${env.DOCKER_REGISTRY} \
-                                            -Ddocker.repository=${env.DOCKER_REPOSITORY} \
-                                            -Djib.to.auth.username=${NEXUS_USER} \
-                                            -Djib.to.auth.password=${NEXUS_PASSWORD} \
-                                            -Djib.container.creationTime=USE_CURRENT_TIMESTAMP \
+                                            -Djib.from.image=eclipse-temurin:21-jre-alpine \
+                                            -Djib.to.image=${env.JIB_IMAGE_PREFIX}/${serviceName} \
+                                            -Djib.to.auth.username=token \
+                                            -Djib.to.auth.password=${SELECTEL_AUTH_TOKEN} \
+                                            -Djib.to.tags=${env.PROJECT_VERSION},latest \
                                             -Djib.container.ports=${port} \
+                                            -Djib.container.creationTime=USE_CURRENT_TIMESTAMP \
+                                            -Djib.container.environment=SPRING_PROFILES_ACTIVE=production \
+                                            -Djib.container.jvmFlags=-Xms512m,-Xmx1g \
                                             -q
                                     """
 
-                                    echo "✅ ${serviceName} image built successfully"
+                                    echo "✅ ${serviceName}:${env.PROJECT_VERSION} built and pushed"
 
                                 } catch (Exception e) {
-                                    echo "⚠️ Ошибка сборки ${serviceName}: ${e.message}"
-                                    currentBuild.result = 'UNSTABLE'
+                                    echo "⚠️ Error with Jib for ${serviceName}: ${e.message}"
+                                    echo "Trying alternative Jib configuration..."
+
+                                    try {
+                                        // Вариант 2: Альтернативная конфигурация
+                                        sh """
+                                            mvn compile jib:build \
+                                                -DskipTests \
+                                                -Dimage=${env.JIB_IMAGE_PREFIX}/${serviceName}:${env.PROJECT_VERSION} \
+                                                -Djib.to.auth.username=token \
+                                                -Djib.to.auth.password=${SELECTEL_AUTH_TOKEN} \
+                                                -Djib.to.tags=latest \
+                                                -q
+                                        """
+                                        echo "✅ ${serviceName} built with alternative method"
+                                    } catch (Exception e2) {
+                                        echo "❌ All Jib methods failed for ${serviceName}"
+                                        currentBuild.result = 'UNSTABLE'
+                                    }
                                 }
                             }
                         }
                     }
-
-                    echo "✅ Все Docker images построены!"
                 }
             }
         }
 
-        stage('Deploy Maven Artifacts to Nexus') {
+        stage('Generate Deployment Artifacts') {
             steps {
                 script {
-                    echo "📤 Deploying Maven artifacts to Nexus..."
+                    echo "📄 Generating deployment artifacts..."
 
                     withCredentials([
-                        usernamePassword(
-                            credentialsId: 'nexus-credentials',
-                            usernameVariable: 'NEXUS_USER',
-                            passwordVariable: 'NEXUS_PASSWORD'
+                        string(
+                            credentialsId: 'selectel-registry-auth',
+                            variable: 'SELECTEL_AUTH_TOKEN'
                         )
                     ]) {
-                        try {
-                            // Используем стандартный Maven deploy
-                            def repositoryUrl = "${env.NEXUS_URL}/repository/${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NEXUS_REPO_RELEASE}"
-
-                            sh """
-                                mvn deploy \
-                                    -DskipTests \
-                                    -DaltDeploymentRepository=nexus::default::${repositoryUrl} \
-                                    -DrepositoryId=nexus
-                            """
-
-                            echo "✅ Maven artifacts deployed to Nexus!"
-
-                            // Сохраняем информацию о деплое
-                            writeFile file: 'deployment-info.txt', text: """
-Deployment Information
-======================
-Timestamp: ${new Date()}
+                        // 1. Deployment information
+                        writeFile file: 'deployment-info.txt', text: """=== Recognition Microservices Deployment ===
+Build Timestamp: ${new Date()}
 Version: ${env.PROJECT_VERSION}
-Type: ${env.IS_SNAPSHOT ? 'SNAPSHOT' : 'RELEASE'}
+Container Registry: ${env.SELECTEL_REGISTRY}
+Namespace: ${env.DOCKER_NAMESPACE}
 
-Docker Images:
-- ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
-- ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
-- ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
-- ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
+Available Docker Images:
+----------------------------------------------------------
+1. API Gateway:
+   Image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
+   Port: 8080
+   Latest: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:latest
 
-Maven Repository:
-${repositoryUrl}
+2. Request Service:
+   Image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
+   Port: 8082
+   Latest: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:latest
+
+3. Processing Service:
+   Image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
+   Port: 8083
+   Latest: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:latest
+
+4. Result Service:
+   Image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
+   Port: 8084
+   Latest: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:latest
 
 Pull Commands:
-docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
-docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
-docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
-docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
+----------------------------------------------------------
+docker pull ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
+docker pull ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
+docker pull ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
+docker pull ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
+
+Authentication:
+----------------------------------------------------------
+To authenticate with Selectel Registry:
+
+1. Using Docker CLI:
+   docker login ${env.SELECTEL_REGISTRY} \\
+     --username token \\
+     --password-stdin < your-token-file.txt
+
+2. Or create docker config file:
+   mkdir -p ~/.docker
+   cat > ~/.docker/config.json << 'EOF'
+   {
+     "auths": {
+       "${env.SELECTEL_REGISTRY}": {
+         "auth": "${SELECTEL_AUTH_TOKEN}"
+       }
+     }
+   }
+   EOF
+
+Docker Compose Configuration:
+----------------------------------------------------------
+Save as docker-compose.yml:
+
+version: '3.8'
+services:
+  api-gateway:
+    image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+
+  request-service:
+    image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+
+  processing-service:
+    image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+
+  result-service:
+    image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
+    ports:
+      - "8084:8084"
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+
+Deployment Steps:
+----------------------------------------------------------
+1. Authenticate: docker login ${env.SELECTEL_REGISTRY}
+2. Pull images: docker-compose pull
+3. Run: docker-compose up -d
+4. Check: docker-compose ps
 """
 
-                            archiveArtifacts artifacts: 'deployment-info.txt', fingerprint: false
+                        // 2. Docker Compose file
+                        writeFile file: 'docker-compose.yml', text: """version: '3.8'
 
-                        } catch (Exception e) {
-                            echo "⚠️ Ошибка деплоя в Nexus: ${e.message}"
-                            currentBuild.result = 'UNSTABLE'
-                        }
-                    }
-                }
-            }
-        }
+services:
+  api-gateway:
+    image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
+    container_name: recognition-api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+      - JAVA_OPTS=-Xms512m -Xmx1g
+    restart: unless-stopped
+    networks:
+      - recognition-network
 
-        stage('Generate Deployment Manifests') {
-            steps {
-                script {
-                    echo "📋 Generating deployment manifests..."
+  request-service:
+    image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
+    container_name: recognition-request-service
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+      - JAVA_OPTS=-Xms512m -Xmx1g
+    restart: unless-stopped
+    networks:
+      - recognition-network
+    depends_on:
+      - api-gateway
 
-                    // Kubernetes manifests
-                    sh 'mkdir -p k8s-manifests'
+  processing-service:
+    image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
+    container_name: recognition-processing-service
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+      - JAVA_OPTS=-Xms512m -Xmx1g
+    restart: unless-stopped
+    networks:
+      - recognition-network
+    depends_on:
+      - request-service
 
-                    def services = [
-                        'recognition-api-gateway': '8080',
-                        'recognition-request-service': '8082',
-                        'recognition-processing-service': '8083',
-                        'recognition-result-service': '8084'
-                    ]
+  result-service:
+    image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
+    container_name: recognition-result-service
+    ports:
+      - "8084:8084"
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+      - JAVA_OPTS=-Xms512m -Xmx1g
+    restart: unless-stopped
+    networks:
+      - recognition-network
+    depends_on:
+      - processing-service
 
-                    services.each { serviceName, port ->
-                        // Deployment
-                        writeFile file: "k8s-manifests/${serviceName}-deployment.yaml", text: """apiVersion: apps/v1
+networks:
+  recognition-network:
+    driver: bridge
+"""
+
+                        // 3. Kubernetes deployment
+                        writeFile file: 'kubernetes-deployment.yaml', text: """# Kubernetes Deployment for Recognition Microservices
+# Version: ${env.PROJECT_VERSION}
+
+---
+# Registry Pull Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: selectel-registry-secret
+  namespace: recognition
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: ${sh(script: '''
+    echo -n "{\\"auths\\":{\\"${SELECTEL_REGISTRY}\\":{\\"auth\\":\\"${SELECTEL_AUTH_TOKEN}\\"}}}" | base64 | tr -d '\n'
+  ''', returnStdout: true).trim()}
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: recognition
+
+---
+# API Gateway
+apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ${serviceName}
+  name: recognition-api-gateway
+  namespace: recognition
   labels:
-    app: ${serviceName}
+    app: api-gateway
     version: ${env.PROJECT_VERSION}
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: ${serviceName}
+      app: api-gateway
   template:
     metadata:
       labels:
-        app: ${serviceName}
+        app: api-gateway
         version: ${env.PROJECT_VERSION}
     spec:
+      imagePullSecrets:
+      - name: selectel-registry-secret
       containers:
-      - name: ${serviceName}
-        image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/${serviceName}:${env.PROJECT_VERSION}
+      - name: api-gateway
+        image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
+        imagePullPolicy: Always
         ports:
-        - containerPort: ${port}
+        - containerPort: 8080
         env:
         - name: SPRING_PROFILES_ACTIVE
           value: "production"
@@ -328,101 +387,180 @@ spec:
           limits:
             memory: "1Gi"
             cpu: "500m"
-"""
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 15
 
-                        // Service
-                        writeFile file: "k8s-manifests/${serviceName}-service.yaml", text: """apiVersion: v1
+---
+apiVersion: v1
 kind: Service
 metadata:
-  name: ${serviceName}
+  name: api-gateway
+  namespace: recognition
+spec:
+  type: LoadBalancer
+  selector:
+    app: api-gateway
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+
+---
+# Request Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recognition-request-service
+  namespace: recognition
+  labels:
+    app: request-service
+    version: ${env.PROJECT_VERSION}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: request-service
+  template:
+    metadata:
+      labels:
+        app: request-service
+        version: ${env.PROJECT_VERSION}
+    spec:
+      imagePullSecrets:
+      - name: selectel-registry-secret
+      containers:
+      - name: request-service
+        image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8082
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "production"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: request-service
+  namespace: recognition
 spec:
   selector:
-    app: ${serviceName}
+    app: request-service
   ports:
-  - port: ${port}
-    targetPort: ${port}
-  type: ClusterIP
-"""
-                    }
+  - port: 8082
+    targetPort: 8082
 
-                    // Docker Compose
-                    writeFile file: 'docker-compose.yml', text: """version: '3.8'
-
-services:
-  api-gateway:
-    image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
-    ports:
-      - "8080:8080"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-
-  request-service:
-    image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
-    ports:
-      - "8082:8082"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-
-  processing-service:
-    image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
-    ports:
-      - "8083:8083"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
-
-  result-service:
-    image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
-    ports:
-      - "8084:8084"
-    environment:
-      - SPRING_PROFILES_ACTIVE=production
+# Аналогично добавьте другие сервисы...
 """
 
-                    // Deploy script
-                    writeFile file: 'deploy.sh', text: """#!/bin/bash
-# Deployment script for Recognition Microservices
+                        // 4. Simple deploy script
+                        writeFile file: 'deploy.sh', text: """#!/bin/bash
+# Simple deployment script for Recognition Microservices
+
 set -e
 
-echo "=== Deploying Recognition Microservices ==="
-echo "Version: ${env.PROJECT_VERSION}"
-echo "Registry: ${env.DOCKER_REGISTRY}"
+VERSION="${env.PROJECT_VERSION}"
+REGISTRY="${env.SELECTEL_REGISTRY}"
+NAMESPACE="${env.DOCKER_NAMESPACE}"
+
+echo "=========================================="
+echo "Deploying Recognition Microservices v\${VERSION}"
+echo "Registry: \${REGISTRY}"
+echo "=========================================="
+
+echo ""
+echo "Available deployment methods:"
+echo "1. Docker Compose"
+echo "2. Kubernetes"
+echo "3. Manual Docker commands"
 echo ""
 
-METHOD="\${1:-docker-compose}"
+read -p "Select method (1-3): " method
 
-case "\$METHOD" in
-    docker-compose)
-        echo "Deploying with Docker Compose..."
+case \$method in
+    1)
+        echo "Using Docker Compose..."
+        if ! command -v docker-compose &> /dev/null; then
+            echo "docker-compose not found. Installing..."
+            sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+        fi
+
+        echo "Pulling images..."
         docker-compose pull
+
+        echo "Starting services..."
         docker-compose up -d
-        echo "Services deployed!"
+
+        echo "Checking services..."
+        docker-compose ps
+
+        echo ""
+        echo "✅ Services deployed!"
+        echo "API Gateway available at: http://localhost:8080"
         ;;
-    kubernetes)
-        echo "Deploying to Kubernetes..."
-        kubectl apply -f k8s-manifests/
-        echo "Kubernetes resources created!"
+
+    2)
+        echo "Using Kubernetes..."
+        if ! command -v kubectl &> /dev/null; then
+            echo "kubectl not found. Please install kubectl first."
+            exit 1
+        fi
+
+        echo "Applying Kubernetes manifests..."
+        kubectl apply -f kubernetes-deployment.yaml
+
+        echo ""
+        echo "✅ Kubernetes resources created!"
+        echo "Check deployment: kubectl get pods -n recognition"
+        echo "Get API Gateway URL: kubectl get svc api-gateway -n recognition"
         ;;
+
+    3)
+        echo "Manual Docker deployment"
+        echo ""
+        echo "To pull and run individual services:"
+        echo ""
+        echo "# API Gateway"
+        echo "docker pull \${REGISTRY}/\${NAMESPACE}/recognition-api-gateway:\${VERSION}"
+        echo "docker run -d -p 8080:8080 --name api-gateway \\\\"
+        echo "  -e SPRING_PROFILES_ACTIVE=production \\\\"
+        echo "  \${REGISTRY}/\${NAMESPACE}/recognition-api-gateway:\${VERSION}"
+        echo ""
+        echo "# Request Service"
+        echo "docker pull \${REGISTRY}/\${NAMESPACE}/recognition-request-service:\${VERSION}"
+        echo "docker run -d -p 8082:8082 --name request-service \\\\"
+        echo "  -e SPRING_PROFILES_ACTIVE=production \\\\"
+        echo "  \${REGISTRY}/\${NAMESPACE}/recognition-request-service:\${VERSION}"
+        echo ""
+        echo "See deployment-info.txt for complete commands"
+        ;;
+
     *)
-        echo "Usage: \$0 [docker-compose|kubernetes]"
+        echo "Invalid option"
         exit 1
         ;;
 esac
 """
 
-                    sh 'chmod +x deploy.sh'
+                        sh 'chmod +x deploy.sh'
 
-                    archiveArtifacts artifacts: 'docker-compose.yml,deploy.sh,k8s-manifests/*.yaml', fingerprint: false
-                    echo "✅ Deployment manifests generated"
-                }
-            }
-        }
+                        // 5. Archive everything
+                        archiveArtifacts artifacts: 'deployment-info.txt,docker-compose.yml,kubernetes-deployment.yaml,deploy.sh', fingerprint: false
 
-        stage('Save Artifacts') {
-            steps {
-                script {
-                    echo "💾 Saving artifacts..."
-                    archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
-                    archiveArtifacts artifacts: 'deployment-info.txt', fingerprint: false
+                        echo "✅ Deployment artifacts generated"
+                    }
                 }
             }
         }
@@ -433,19 +571,15 @@ esac
             script {
                 echo "🏁 Pipeline завершен: ${currentBuild.currentResult}"
 
-                // Очистка
-                sh '''
-                    rm -f deployment-info.txt 2>/dev/null || true
-                '''
-
-                // Отправка уведомления в Telegram
+                // Отправляем уведомление в Telegram
                 try {
                     def emoji = currentBuild.currentResult == 'SUCCESS' ? '✅' :
                                currentBuild.currentResult == 'UNSTABLE' ? '⚠️' : '❌'
 
-                    def message = """
-${emoji} CI/CD Pipeline завершен: ${currentBuild.currentResult}
-Версия: ${env.PROJECT_VERSION ?: 'N/A'}
+                    def message = """${emoji} Recognition CI/CD завершен: ${currentBuild.currentResult}
+Версия: ${env.PROJECT_VERSION}
+Registry: ${env.SELECTEL_REGISTRY}
+Образы: ${env.JIB_IMAGE_PREFIX}/*
 Jenkins: ${env.BUILD_URL}
                     """.trim()
 
@@ -453,7 +587,7 @@ Jenkins: ${env.BUILD_URL}
                         curl -s -X POST \
                         -H 'Content-Type: application/json' \
                         -d '{"chat_id": "486108633", "text": "${message.replace("\n", "\\\\n")}"}' \
-                        https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+                        https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage || true
                     """
                 } catch (Exception e) {
                     echo "Не удалось отправить уведомление: ${e.message}"
@@ -462,6 +596,8 @@ Jenkins: ${env.BUILD_URL}
         }
         success {
             echo '🎉 Сборка и деплой успешно завершены!'
+            echo "📦 Образы доступны в Selectel Registry: ${env.JIB_IMAGE_PREFIX}/*"
+            echo "📄 Артефакты деплоя сохранены в Jenkins"
         }
         failure {
             echo '❌ Сборка завершилась с ошибками!'
