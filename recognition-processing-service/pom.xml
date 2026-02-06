@@ -175,6 +175,7 @@
                             <SPRING_PROFILES_ACTIVE>production</SPRING_PROFILES_ACTIVE>
                         </environment>
                     </container>
+                    <allowInsecureRegistries>true</allowInsecureRegistries>
                 </configuration>
                 <executions>
                     <execution>
