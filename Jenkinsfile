@@ -11,13 +11,17 @@ pipeline {
         PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.PATH}"
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
 
-        // Selectel Container Registry - ПРАВИЛЬНЫЕ НАСТРОЙКИ
+        // Selectel Container Registry
         SELECTEL_REGISTRY = 'cr.selcloud.ru'
-        SELECTEL_REGISTRY_NAME = 'container-registry'  // Имя вашего реестра из личного кабинета
-        DOCKER_NAMESPACE = 'recognition'  // Ваш namespace внутри реестра
+        SELECTEL_REGISTRY_NAME = 'container-registry'
+        DOCKER_NAMESPACE = 'recognition'
 
-        // ПРАВИЛЬНЫЙ путь для Selectel
+        // Image path
         JIB_IMAGE_PREFIX = "${env.SELECTEL_REGISTRY}/${env.SELECTEL_REGISTRY_NAME}/${env.DOCKER_NAMESPACE}"
+
+        // ⚠️ ВРЕМЕННЫЕ CREDENTIALS (замените на свои)
+        SELECTEL_USER = 'token'
+        SELECTEL_PASS = 'CRgAAAAyYQBvku9MC5Q1K3ZtZHjaaXrCf8TjWIx'
     }
 
     stages {
@@ -36,11 +40,6 @@ pipeline {
                     echo "Registry Name: ${env.SELECTEL_REGISTRY_NAME}"
                     echo "Namespace: ${env.DOCKER_NAMESPACE}"
                     echo "Full Image Path: ${env.JIB_IMAGE_PREFIX}/<service-name>:${env.PROJECT_VERSION}"
-
-                    // Проверяем путь
-                    if (!env.JIB_IMAGE_PREFIX.startsWith('cr.selcloud.ru/container-registry/')) {
-                        error "❌ WRONG IMAGE PATH! Should start with: cr.selcloud.ru/container-registry/"
-                    }
                 }
             }
         }
@@ -80,119 +79,10 @@ pipeline {
             }
         }
 
-        stage('Test Selectel Connection') {
+        stage('Build and Push Docker Images') {
             steps {
                 script {
-                    echo "🔗 Testing connection to Selectel Registry..."
-
-                    // Проверяем доступность registry
-                    sh """
-                        echo "Testing registry access..."
-                        curl -s https://${env.SELECTEL_REGISTRY}/v2/ || echo "Registry ping completed"
-                    """
-
-                    // Проверяем credentials
-                    withCredentials([
-                        string(
-                            credentialsId: 'selectel-registry-auth',
-                            variable: 'SELECTEL_AUTH_TOKEN'
-                        )
-                    ]) {
-                        sh '''
-                            echo "=== Selectel Token Info ==="
-                            echo "Token (base64): ${SELECTEL_AUTH_TOKEN}"
-
-                            # Декодируем токен
-                            DECODED=$(echo "${SELECTEL_AUTH_TOKEN}" | base64 -d 2>/dev/null || echo "DECODE_ERROR")
-                            echo "Decoded: ${DECODED}"
-
-                            if [[ "${DECODED}" == "DECODE_ERROR" ]]; then
-                                echo "⚠️ Token is not valid base64!"
-                                echo "Maybe it's already a password? Trying as plain text..."
-                                echo "Token as plain text: ${SELECTEL_AUTH_TOKEN}"
-                            else
-                                USERNAME=$(echo "${DECODED}" | cut -d':' -f1)
-                                PASSWORD=$(echo "${DECODED}" | cut -d':' -f2)
-                                echo "Username from token: ${USERNAME}"
-                                echo "Password length: ${#PASSWORD}"
-                            fi
-                            echo "==========================="
-                        '''
-                    }
-                }
-            }
-        }
-
-        stage('Build and Push with Jib - Simple Method') {
-            steps {
-                script {
-                    echo "🚀 Building and pushing Docker images..."
-
-                    withCredentials([
-                        usernamePassword(
-                            credentialsId: 'selectel-registry-credentials',  // Измените на ваши credentials
-                            usernameVariable: 'SELECTEL_USERNAME',
-                            passwordVariable: 'SELECTEL_PASSWORD'
-                        )
-                    ]) {
-                        // Список сервисов
-                        def services = [
-                            'recognition-api-gateway': '8080',
-                            'recognition-request-service': '8082',
-                            'recognition-processing-service': '8083',
-                            'recognition-result-service': '8084'
-                        ]
-
-                        services.each { serviceName, port ->
-                            echo "📦 Building ${serviceName}..."
-
-                            dir(serviceName) {
-                                try {
-                                    // ПРОСТОЙ и ПРАВИЛЬНЫЙ метод
-                                    sh """
-                                        mvn compile jib:build \
-                                            -DskipTests \
-                                            -Djib.from.image=eclipse-temurin:21-jre-alpine \
-                                            -Djib.to.image=${env.JIB_IMAGE_PREFIX}/${serviceName} \
-                                            -Djib.to.auth.username=${SELECTEL_USERNAME} \
-                                            -Djib.to.auth.password=${SELECTEL_PASSWORD} \
-                                            -Djib.to.tags=${env.PROJECT_VERSION} \
-                                            -Djib.to.tags=latest \
-                                            -Djib.container.ports=${port} \
-                                            -Djib.container.creationTime=USE_CURRENT_TIMESTAMP \
-                                            -Djib.console=plain \
-                                            -q
-                                    """
-
-                                    echo "✅ ${serviceName}:${env.PROJECT_VERSION} pushed to Selectel"
-
-                                } catch (Exception e) {
-                                    echo "⚠️ Error: ${e.message}"
-                                    currentBuild.result = 'UNSTABLE'
-
-                                    // Диагностика
-                                    sh """
-                                        echo "=== DIAGNOSTICS ==="
-                                        echo "Target: ${env.JIB_IMAGE_PREFIX}/${serviceName}"
-                                        echo "Username: ${SELECTEL_USERNAME}"
-                                        echo "Password present: ${SELECTEL_PASSWORD != null}"
-                                        echo "=================="
-                                    """
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Alternative: Build with Docker then Push') {
-            when {
-                expression { currentBuild.result == 'UNSTABLE' || currentBuild.result == null }
-            }
-            steps {
-                script {
-                    echo "🔄 Trying alternative method with Docker CLI..."
+                    echo "🚀 Building and pushing Docker images to Selectel..."
 
                     // Список сервисов
                     def services = [
@@ -202,52 +92,44 @@ pipeline {
                         'recognition-result-service': '8084'
                     ]
 
-                    withCredentials([
-                        usernamePassword(
-                            credentialsId: 'selectel-registry-credentials',
-                            usernameVariable: 'SELECTEL_USERNAME',
-                            passwordVariable: 'SELECTEL_PASSWORD'
-                        )
-                    ]) {
-                        // Логинимся в Selectel Registry
-                        sh """
-                            echo "${SELECTEL_PASSWORD}" | docker login ${env.SELECTEL_REGISTRY} \
-                                -u ${SELECTEL_USERNAME} \
-                                --password-stdin || echo "Docker login completed"
-                        """
+                    services.each { serviceName, port ->
+                        echo "📦 Processing ${serviceName}..."
 
-                        services.each { serviceName, port ->
-                            echo "🐳 Building ${serviceName} with Docker..."
-
-                            dir(serviceName) {
-                                // Собираем JAR
-                                sh 'mvn clean package -DskipTests'
-
-                                // Создаем Dockerfile
-                                writeFile file: 'Dockerfile', text: """FROM eclipse-temurin:21-jre-alpine
-VOLUME /tmp
-COPY target/*.jar app.jar
-ENTRYPOINT ["java","-jar","/app.jar"]
-EXPOSE ${port}
-"""
-
-                                // Собираем образ
+                        dir(serviceName) {
+                            try {
+                                // Используем Jib для сборки и пуша
                                 sh """
-                                    docker build \
-                                        -t ${env.JIB_IMAGE_PREFIX}/${serviceName}:${env.PROJECT_VERSION} \
-                                        -t ${env.JIB_IMAGE_PREFIX}/${serviceName}:latest \
-                                        .
+                                    mvn compile jib:build \
+                                        -DskipTests \
+                                        -Djib.from.image=eclipse-temurin:21-jre-alpine \
+                                        -Djib.to.image=${env.JIB_IMAGE_PREFIX}/${serviceName} \
+                                        -Djib.to.auth.username=${env.SELECTEL_USER} \
+                                        -Djib.to.auth.password=${env.SELECTEL_PASS} \
+                                        -Djib.to.tags=${env.PROJECT_VERSION} \
+                                        -Djib.to.tags=latest \
+                                        -Djib.container.ports=${port} \
+                                        -Djib.container.creationTime=USE_CURRENT_TIMESTAMP \
+                                        -Djib.container.environment=SPRING_PROFILES_ACTIVE=production \
+                                        -Djib.console=plain \
+                                        -q
                                 """
 
-                                // Пушим образ
+                                echo "✅ ${serviceName}:${env.PROJECT_VERSION} pushed to Selectel"
+
+                            } catch (Exception e) {
+                                echo "⚠️ Error building ${serviceName}: ${e.message}"
+                                currentBuild.result = 'UNSTABLE'
+
+                                // Диагностика
                                 sh """
-                                    docker push ${env.JIB_IMAGE_PREFIX}/${serviceName}:${env.PROJECT_VERSION} || echo "Push failed"
-                                    docker push ${env.JIB_IMAGE_PREFIX}/${serviceName}:latest || echo "Latest push failed"
+                                    echo "=== DIAGNOSTICS ==="
+                                    echo "Service: ${serviceName}"
+                                    echo "Target Image: ${env.JIB_IMAGE_PREFIX}/${serviceName}"
+                                    echo "Error: ${e.message}"
+                                    echo "=================="
                                 """
                             }
                         }
-
-                        sh "docker logout ${env.SELECTEL_REGISTRY} || true"
                     }
                 }
             }
@@ -258,65 +140,97 @@ EXPOSE ${port}
                 script {
                     echo "📄 Generating deployment information..."
 
-                    writeFile file: 'SELECTEL_DEPLOYMENT.md', text: """# Selectel Container Registry Deployment
+                    // Создаем информацию о деплое
+                    writeFile file: 'deployment-info.txt', text: """
+=== Recognition Microservices Deployment ===
 
-## Registry Information
-- **Registry URL:** ${env.SELECTEL_REGISTRY}
-- **Registry Name:** ${env.SELECTEL_REGISTRY_NAME}
-- **Namespace:** ${env.DOCKER_NAMESPACE}
-- **Version:** ${env.PROJECT_VERSION}
-- **Build Date:** ${new Date()}
+Registry Information:
+- Registry URL: ${env.SELECTEL_REGISTRY}
+- Registry Name: ${env.SELECTEL_REGISTRY_NAME}
+- Namespace: ${env.DOCKER_NAMESPACE}
+- Version: ${env.PROJECT_VERSION}
+- Build Date: ${new Date()}
 
-## Available Images
+Available Images:
 
-### 1. API Gateway
-\`\`\`
-Image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
-Port: 8080
-Pull: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
-\`\`\`
+1. API Gateway
+   Image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
+   Port: 8080
+   Pull Command: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
 
-### 2. Request Service
-\`\`\`
-Image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
-Port: 8082
-Pull: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
-\`\`\`
+2. Request Service
+   Image: ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
+   Port: 8082
+   Pull Command: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}
 
-### 3. Processing Service
-\`\`\`
-Image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
-Port: 8083
-Pull: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
-\`\`\`
+3. Processing Service
+   Image: ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
+   Port: 8083
+   Pull Command: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}
 
-### 4. Result Service
-\`\`\`
-Image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
-Port: 8084
-Pull: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
-\`\`\`
+4. Result Service
+   Image: ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
+   Port: 8084
+   Pull Command: docker pull ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}
 
-## Authentication
-\`\`\`bash
-# Login to Selectel Registry
-docker login ${env.SELECTEL_REGISTRY} \\
-  --username <your-username> \\
-  --password <your-password-or-token>
-\`\`\`
+Authentication:
+To pull images from Selectel Registry:
 
-## Docker Compose Example
-\`\`\`yaml
+1. Using Docker CLI:
+   docker login ${env.SELECTEL_REGISTRY} \\
+     --username ${env.SELECTEL_USER} \\
+     --password-stdin < your-token-file.txt
+
+2. Or create docker config file:
+   mkdir -p ~/.docker
+   cat > ~/.docker/config.json << 'EOF'
+   {
+     "auths": {
+       "${env.SELECTEL_REGISTRY}": {
+         "auth": "dG9rZW46Q1JnQUFBQUF5WUJRdmt1OU1DNVExSzNadFpIamFhWHJDZjhUaldJeA=="
+       }
+     }
+   }
+   EOF
+
+Docker Compose Example:
 version: '3.8'
 services:
   api-gateway:
     image: ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}
     ports:
       - "8080:8080"
-\`\`\`
+      """
+
+                    // Создаем простой скрипт деплоя
+                    writeFile file: 'deploy.sh', text: """#!/bin/bash
+# Deployment script for Recognition Microservices
+
+echo "=========================================="
+echo "Deploying Recognition Microservices v${env.PROJECT_VERSION}"
+echo "Registry: ${env.SELECTEL_REGISTRY}"
+echo "=========================================="
+
+echo ""
+echo "Pull all images:"
+echo "docker pull ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}"
+echo "docker pull ${env.JIB_IMAGE_PREFIX}/recognition-request-service:${env.PROJECT_VERSION}"
+echo "docker pull ${env.JIB_IMAGE_PREFIX}/recognition-processing-service:${env.PROJECT_VERSION}"
+echo "docker pull ${env.JIB_IMAGE_PREFIX}/recognition-result-service:${env.PROJECT_VERSION}"
+
+echo ""
+echo "Run API Gateway:"
+echo "docker run -d -p 8080:8080 \\\\"
+echo "  -e SPRING_PROFILES_ACTIVE=production \\\\"
+echo "  ${env.JIB_IMAGE_PREFIX}/recognition-api-gateway:${env.PROJECT_VERSION}"
+
+echo ""
+echo "For more details see deployment-info.txt"
 """
 
-                    archiveArtifacts artifacts: 'SELECTEL_DEPLOYMENT.md', fingerprint: false
+                    sh 'chmod +x deploy.sh'
+
+                    archiveArtifacts artifacts: 'deployment-info.txt,deploy.sh', fingerprint: false
                     echo "✅ Deployment info generated"
                 }
             }
@@ -328,14 +242,14 @@ services:
             script {
                 echo "🏁 Pipeline завершен: ${currentBuild.currentResult}"
 
-                // Отправляем уведомление
+                // Отправляем уведомление в Telegram
                 try {
                     def emoji = currentBuild.currentResult == 'SUCCESS' ? '✅' :
                                currentBuild.currentResult == 'UNSTABLE' ? '⚠️' : '❌'
 
                     def message = """${emoji} Recognition CI/CD: ${currentBuild.currentResult}
 Версия: ${env.PROJECT_VERSION}
-Registry: ${env.SELECTEL_REGISTRY}/${env.SELECTEL_REGISTRY_NAME}
+Registry: ${env.SELECTEL_REGISTRY}
 Jenkins: ${env.BUILD_URL}
                     """.trim()
 
@@ -352,7 +266,7 @@ Jenkins: ${env.BUILD_URL}
         }
         success {
             echo '🎉 Сборка успешно завершена!'
-            echo "📦 Образы: ${env.JIB_IMAGE_PREFIX}/*"
+            echo "📦 Образы доступны в Selectel Registry: ${env.JIB_IMAGE_PREFIX}/*"
         }
         failure {
             echo '❌ Сборка завершилась с ошибками!'
