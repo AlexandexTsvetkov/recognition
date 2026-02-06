@@ -103,9 +103,6 @@
                     </from>
                     <to>
                         <image>${docker.registry}/${docker.repository}/${project.artifactId}:${project.version}</image>
-                        <tags>
-                            <tag>latest</tag>
-                        </tags>
                     </to>
                     <container>
                         <ports>
