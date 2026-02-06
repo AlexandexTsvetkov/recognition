@@ -122,14 +122,20 @@ pipeline {
                             cat /tmp/image_status.txt
                         '''
 
-                        // Читаем статусы и решаем что делать дальше
-                        def statusText = sh(script: 'cat /tmp/image_status.txt', returnStdout: true).trim()
+                        // ИСПРАВЛЕНИЕ: Читаем файл и парсим статусы правильно
+                        def statusFile = '/tmp/image_status.txt'
                         def allExist = true
                         def servicesToBuild = []
 
-                        statusText.eachLine { line ->
+                        // Читаем файл построчно с помощью shell
+                        def statusLines = sh(script: "cat ${statusFile}", returnStdout: true).trim()
+
+                        // Разбиваем на строки
+                        def lines = statusLines.split('\n')
+
+                        lines.each { line ->
                             def parts = line.split(':')
-                            if (parts.size() == 2) {
+                            if (parts.size() >= 2) {
                                 def service = parts[0]
                                 def status = parts[1]
 
@@ -140,7 +146,7 @@ pipeline {
                             }
                         }
 
-                        if (allExist) {
+                        if (allExist && servicesToBuild.size() > 0) {
                             echo "ВСЕ образы уже существуют в реестре. Пропускаем сборку Docker образов."
                             env.SKIP_DOCKER_BUILD = 'true'
                         } else {
