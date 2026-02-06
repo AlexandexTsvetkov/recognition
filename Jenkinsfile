@@ -21,10 +21,16 @@ pipeline {
         stage('Initialize') {
             steps {
                 script {
-                    def version = sh(script: 'mvn help:evaluate -Dexpression=project.version -q -DforceStdout', returnStdout: true).trim()
-                    env.PROJECT_VERSION = version
+                    // Добавляем timestamp к версии для уникальности
+                    def timestamp = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
+                    def baseVersion = sh(script: 'mvn help:evaluate -Dexpression=project.version -q -DforceStdout', returnStdout: true).trim()
 
-                    echo "Version: ${env.PROJECT_VERSION}"
+                    // Создаем уникальную версию с timestamp
+                    env.PROJECT_VERSION = baseVersion
+                    env.BUILD_VERSION = "${baseVersion}-${env.BUILD_ID}"
+
+                    echo "Base Version: ${env.PROJECT_VERSION}"
+                    echo "Build Version: ${env.BUILD_VERSION}"
                     echo "Registry: ${env.JIB_IMAGE_PREFIX}"
                 }
             }
@@ -63,7 +69,7 @@ pipeline {
         stage('Clean Registry if needed') {
             steps {
                 script {
-                    echo "Cleaning registry from previous builds..."
+                    echo "Проверка и очистка предыдущих образов..."
 
                     withCredentials([
                         usernamePassword(
@@ -73,34 +79,42 @@ pipeline {
                         )
                     ]) {
                         sh '''
-                            # Логинимся
-                            echo "${SELECTEL_PASS}" | docker login cr.selcloud.ru \
+                            # Логинимся в реестр
+                            echo "${SELECTEL_PASS}" | docker login ${SELECTEL_REGISTRY} \
                                 -u ${SELECTEL_USER} \
                                 --password-stdin
 
-                            # Пробуем удалить старые образы если они есть
+                            # Проверяем и удаляем образы с тегом 0.0.1-SNAPSHOT если они есть
                             for SERVICE in recognition-api-gateway recognition-request-service recognition-processing-service recognition-result-service; do
-                                echo "Checking ${SERVICE}..."
+                                echo "Проверяем ${SERVICE}..."
 
-                                # Удаляем локально если есть
-                                docker rmi cr.selcloud.ru/container-registry/${SERVICE}:latest 2>/dev/null || true
-                                docker rmi cr.selcloud.ru/container-registry/${SERVICE}:${PROJECT_VERSION} 2>/dev/null || true
+                                # Проверяем существует ли образ в реестре
+                                if curl -s -f -u "${SELECTEL_USER}:${SELECTEL_PASS}" \
+                                    "https://${SELECTEL_REGISTRY}/v2/${SELECTEL_REGISTRY_NAME}/${SERVICE}/tags/list" \
+                                    | grep -q "0.0.1-SNAPSHOT"; then
 
-                                # Пробуем удалить из registry (если поддерживается)
-                                echo "Attempting to clean ${SERVICE} from registry..."
+                                    echo "Образ ${SERVICE}:0.0.1-SNAPSHOT найден в реестре"
+                                    echo "Для удаления образа из реестра используйте Selectel CLI или веб-интерфейс"
+                                else
+                                    echo "Образ ${SERVICE}:0.0.1-SNAPSHOT не найден в реестре"
+                                fi
+
+                                # Удаляем локальные образы если они есть
+                                docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:0.0.1-SNAPSHOT 2>/dev/null || true
+                                docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:latest 2>/dev/null || true
                             done
 
-                            docker logout cr.selcloud.ru || true
+                            docker logout ${SELECTEL_REGISTRY} || true
                         '''
                     }
                 }
             }
         }
 
-        stage('Build and Push WITHOUT latest tag') {
+        stage('Build and Push Docker Images') {
             steps {
                 script {
-                    echo "Building and pushing WITHOUT latest tag..."
+                    echo "Сборка и загрузка Docker образов..."
 
                     withCredentials([
                         usernamePassword(
@@ -118,8 +132,11 @@ pipeline {
 
                         services.each { serviceName, port ->
                             dir(serviceName) {
+                                echo "Обрабатываем ${serviceName}..."
+
+                                // СПОСОБ 1: Используем Jib с уникальным тегом
                                 try {
-                                    // ТОЛЬКО версия, НЕ latest
+                                    // Используем BUILD_VERSION вместо PROJECT_VERSION для уникальности
                                     sh """
                                         mvn compile jib:build \
                                             -DskipTests \
@@ -127,42 +144,53 @@ pipeline {
                                             -Djib.to.image=${env.JIB_IMAGE_PREFIX}/${serviceName} \
                                             -Djib.to.auth.username='${SELECTEL_USER}' \
                                             -Djib.to.auth.password='${SELECTEL_PASS}' \
-                                            -Djib.to.tags='${env.PROJECT_VERSION}' \
+                                            -Djib.to.tags='${env.BUILD_VERSION}' \
                                             -Djib.container.ports=${port} \
-                                            -Djib.console=plain \
-                                            -q
+                                            -Djib.console=plain
                                     """
 
-                                    echo "Success: ${serviceName}:${env.PROJECT_VERSION}"
+                                    echo "✅ Успешно: ${serviceName}:${env.BUILD_VERSION}"
 
                                 } catch (Exception e) {
-                                    echo "Error with Jib: ${e.message}"
-                                    echo "Trying Docker CLI method..."
+                                    echo "Ошибка с Jib: ${e.message}"
+                                    echo "Пробуем Docker CLI метод..."
 
-                                    // Fallback на Docker CLI
+                                    // СПОСОБ 2: Docker CLI fallback
                                     sh '''
+                                        # Собираем JAR
                                         mvn clean package -DskipTests
 
-                                        # Создаем простой Dockerfile
+                                        # Создаем Dockerfile
                                         cat > Dockerfile << EOF
                                         FROM eclipse-temurin:21-jre-alpine
                                         COPY target/*.jar app.jar
-                                        ENTRYPOINT ["java","-jar","/app.jar"]
+                                        EXPOSE ''' + port + '''
+                                        ENTRYPOINT ["java", "-jar", "/app.jar"]
                                         EOF
 
-                                        # Логинимся
-                                        echo "${SELECTEL_PASS}" | docker login cr.selcloud.ru \
+                                        # Логинимся в реестр
+                                        echo "${SELECTEL_PASS}" | docker login ${SELECTEL_REGISTRY} \
                                             -u ${SELECTEL_USER} \
                                             --password-stdin
 
-                                        # Собираем и пушим
-                                        docker build -t ${JIB_IMAGE_PREFIX}/${serviceName}:${PROJECT_VERSION} .
-                                        docker push ${JIB_IMAGE_PREFIX}/${serviceName}:${PROJECT_VERSION}
+                                        # Собираем образ
+                                        docker build -t ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION} .
 
-                                        docker logout cr.selcloud.ru || true
+                                        # Загружаем в реестр
+                                        docker push ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION}
+
+                                        # Также помечаем как latest (опционально)
+                                        docker tag ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION} ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:latest
+                                        docker push ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:latest
+
+                                        # Очищаем локальные образы
+                                        docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:${BUILD_VERSION} || true
+                                        docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE_NAME}:latest || true
+
+                                        docker logout ${SELECTEL_REGISTRY} || true
                                     '''
 
-                                    echo "Docker CLI success: ${serviceName}"
+                                    echo "✅ Успешно через Docker CLI: ${serviceName}:${env.BUILD_VERSION}"
                                 }
                             }
                         }
@@ -174,7 +202,7 @@ pipeline {
         stage('Verify Push') {
             steps {
                 script {
-                    echo "Verifying images were pushed..."
+                    echo "Проверка загруженных образов..."
 
                     withCredentials([
                         usernamePassword(
@@ -184,26 +212,32 @@ pipeline {
                         )
                     ]) {
                         sh '''
-                            echo "Logging in to verify..."
-                            echo "${SELECTEL_PASS}" | docker login cr.selcloud.ru \
+                            echo "Логинимся для проверки..."
+                            echo "${SELECTEL_PASS}" | docker login ${SELECTEL_REGISTRY} \
                                 -u ${SELECTEL_USER} \
                                 --password-stdin
 
-                            echo "Verifying each service:"
+                            echo "Проверяем каждый сервис:"
 
                             for SERVICE in recognition-api-gateway recognition-request-service recognition-processing-service recognition-result-service; do
                                 echo ""
-                                echo "Verifying ${SERVICE}:${PROJECT_VERSION}"
+                                echo "Проверяем ${SERVICE}:${BUILD_VERSION}"
 
-                                if docker pull cr.selcloud.ru/container-registry/${SERVICE}:${PROJECT_VERSION} 2>/dev/null; then
-                                    echo "✅ VERIFIED: ${SERVICE}:${PROJECT_VERSION}"
-                                    docker rmi cr.selcloud.ru/container-registry/${SERVICE}:${PROJECT_VERSION}
+                                if docker pull ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION} 2>/dev/null; then
+                                    echo "✅ ПРОВЕРЕНО: ${SERVICE}:${BUILD_VERSION}"
+
+                                    # Получаем информацию об образе
+                                    echo "Информация об образе:"
+                                    docker inspect ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION} | grep -E "Created|Size"
+
+                                    # Удаляем локальную копию
+                                    docker rmi ${JIB_IMAGE_PREFIX}/${SERVICE}:${BUILD_VERSION}
                                 else
-                                    echo "❌ NOT FOUND: ${SERVICE}:${PROJECT_VERSION}"
+                                    echo "❌ НЕ НАЙДЕНО: ${SERVICE}:${BUILD_VERSION}"
                                 fi
                             done
 
-                            docker logout cr.selcloud.ru
+                            docker logout ${SELECTEL_REGISTRY}
                         '''
                     }
                 }
@@ -214,28 +248,35 @@ pipeline {
     post {
         always {
             script {
-                echo "Pipeline finished: ${currentBuild.currentResult}"
+                echo "Pipeline завершен: ${currentBuild.currentResult}"
 
                 try {
                     def emoji = currentBuild.currentResult == 'SUCCESS' ? '✅' :
                                currentBuild.currentResult == 'UNSTABLE' ? '⚠️' : '❌'
 
+                    def message = """
+${emoji} Recognition CI/CD: ${currentBuild.currentResult}
+Версия: ${env.PROJECT_VERSION}
+Версия сборки: ${env.BUILD_VERSION}
+Jenkins: ${env.BUILD_URL}
+                    """.trim()
+
                     sh """
                         curl -s -X POST \
                         -H 'Content-Type: application/json' \
-                        -d '{"chat_id": "486108633", "text": "${emoji} Recognition CI/CD: ${currentBuild.currentResult}\\\\nVersion: ${env.PROJECT_VERSION}\\\\nJenkins: ${env.BUILD_URL}"}' \
+                        -d '{"chat_id": "486108633", "text": "${message}"}' \
                         https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage || true
                     """
                 } catch (Exception e) {
-                    echo "Telegram error"
+                    echo "Ошибка отправки в Telegram: ${e.message}"
                 }
             }
         }
         success {
-            echo 'Build successful!'
+            echo 'Сборка успешна!'
         }
         failure {
-            echo 'Build failed!'
+            echo 'Сборка не удалась!'
         }
     }
 }
