@@ -71,7 +71,7 @@ pipeline {
 
                     withCredentials([
                         usernamePassword(
-                            credentialsId: 'selectel-registry',
+                            credentialsId: 'selectel-registry-credentials',
                             usernameVariable: 'SELECTEL_USER',
                             passwordVariable: 'SELECTEL_PASS'
                         )
