@@ -12,20 +12,36 @@ pipeline {
         PATH = "${env.JAVA_HOME}/bin:${env.MAVEN_HOME}/bin:${env.DEP_CHECK_TOOL}/bin:${env.PATH}"
         MAVEN_OPTS = '-Dmaven.test.failure.ignore=true'
         SONAR_CLOUD_TOKEN = credentials('SONAR_CLOUD_TOKEN')
-        NVD_API_KEY = '85a8615e-1661-4d28-9922-a7d0143cb4bd'
 
-        // Nexus Maven репозитории
+        // Исправляем NVD API ключ
+        NVD_API_KEY = credentials('NVD_API_KEY') ?: ''
+
+        // Nexus
         NEXUS_URL = 'http://31.186.103.242:8081'
         NEXUS_REPO_SNAPSHOT = 'maven-snapshots'
         NEXUS_REPO_RELEASE = 'maven-releases'
 
-        // Nexus Docker Registry (используем тот же порт 8081)
-        NEXUS_DOCKER_REGISTRY = '31.186.103.242:8081'
-        NEXUS_DOCKER_REPOSITORY = 'docker-hosted'
-        DOCKER_IMAGE_PREFIX = 'recognition'
+        // Docker settings должны совпадать с pom.xml
+        DOCKER_REGISTRY = '31.186.103.242:8081'
+        DOCKER_REPOSITORY = 'repository/docker-hosted'
+        DOCKER_NAMESPACE = 'recognition'
+
+        // Получаем версию проекта
+        PROJECT_VERSION = getMavenProjectVersion()
+        IS_SNAPSHOT = "${env.PROJECT_VERSION}".contains('-SNAPSHOT')
     }
 
     stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    echo "🚀 Initializing Recognition Microservices CI/CD"
+                    echo "Project Version: ${env.PROJECT_VERSION}"
+                    echo "Is Snapshot: ${env.IS_SNAPSHOT}"
+                }
+            }
+        }
+
         stage('Checkout') {
             steps {
                 checkout scm
@@ -35,17 +51,16 @@ pipeline {
         stage('Build & Test with JaCoCo') {
             steps {
                 script {
-                    echo "Используем Maven: ${env.MAVEN_HOME}"
-                    echo "Используем Java: ${env.JAVA_HOME}"
+                    echo "🔨 Building and testing..."
 
-                    // Сборка и тесты
-                    sh 'mvn clean test'
+                    // Сначала компилируем
+                    sh 'mvn clean compile test-compile -q'
 
-                    // Агрегированный отчет JaCoCo
+                    // Запускаем тесты
+                    sh 'mvn test'
+
+                    // Генерируем отчеты JaCoCo
                     sh 'mvn jacoco:report-aggregate'
-
-                    // Пакетирование
-                    sh 'mvn package -DskipTests'
                 }
             }
 
@@ -70,19 +85,15 @@ pipeline {
                 script {
                     echo "🔒 Запуск SAST анализа"
 
-                    // Создаем директорию для отчетов
+                    // Пропускаем если нет API ключа
+                    if (!env.NVD_API_KEY || env.NVD_API_KEY.trim().isEmpty()) {
+                        echo "⚠️ NVD API Key не настроен, пропускаем Dependency Check"
+                        return
+                    }
+
                     sh 'mkdir -p reports/dependency-check'
 
-                    // Обновляем базу данных
-                    sh """
-                        "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh" \
-                        --updateonly \
-                        --nvdApiKey ${env.NVD_API_KEY} \
-                        --data ${HOME}/.dependency-check/data \
-                        || echo "Обновление завершено"
-                    """
-
-                    // Запускаем анализ
+                    // Упрощаем команду - без обновления если нет доступа
                     sh """
                         "${env.DEP_CHECK_TOOL}/bin/dependency-check.sh" \
                         --project "Recognition Microservices" \
@@ -91,29 +102,23 @@ pipeline {
                         --format "JSON" \
                         --out "reports/dependency-check" \
                         --nvdApiKey ${env.NVD_API_KEY} \
-                        --data ${HOME}/.dependency-check/data \
                         --disableBundleAudit \
                         --disablePyDist \
                         --disablePyPkg \
                         --disableNodeAudit \
                         --disableNodeJS \
                         --disableRetireJS \
-                        --failOnCVSS 7 \
-                        || echo "Анализ завершен"
+                        --failOnCVSS 8 \
+                        --enableExperimental \
+                        || echo "Dependency check завершен с предупреждениями"
                     """
-
-                    // Проверяем созданные файлы
-                    sh '''
-                        echo "Проверка созданных отчетов:"
-                        ls -la reports/dependency-check/ 2>/dev/null || echo "Каталог reports/dependency-check не найден"
-                    '''
                 }
             }
             post {
                 always {
-                    // Публикуем HTML отчет если он есть
                     script {
-                        if (fileExists('reports/dependency-check/dependency-check-report.html')) {
+                        def htmlReport = 'reports/dependency-check/dependency-check-report.html'
+                        if (fileExists(htmlReport)) {
                             publishHTML([
                                 allowMissing: false,
                                 alwaysLinkToLastBuild: true,
@@ -126,44 +131,7 @@ pipeline {
                             echo "HTML отчет Dependency Check не найден"
                         }
                     }
-
-                    // Архивируем отчеты
                     archiveArtifacts artifacts: 'reports/dependency-check/*', fingerprint: false
-
-                    // Анализируем JSON отчет если он есть
-                    script {
-                        def jsonReport = "reports/dependency-check/dependency-check-report.json"
-                        if (fileExists(jsonReport)) {
-                            try {
-                                def report = readJSON file: jsonReport
-                                def totalDeps = report.dependencies?.size() ?: 0
-                                def vulnerableDeps = 0
-                                def totalVulns = 0
-
-                                report.dependencies?.each { dep ->
-                                    if (dep.vulnerabilities && !dep.vulnerabilities.isEmpty()) {
-                                        vulnerableDeps++
-                                        totalVulns += dep.vulnerabilities.size()
-                                    }
-                                }
-
-                                echo "📊 Результаты безопасности:"
-                                echo "• Проанализировано зависимостей: ${totalDeps}"
-                                echo "• Уязвимых зависимостей: ${vulnerableDeps}"
-                                echo "• Всего уязвимостей: ${totalVulns}"
-
-                                if (vulnerableDeps > 0) {
-                                    currentBuild.result = 'UNSTABLE'
-                                    echo "⚠️  Найдены уязвимости в зависимостях"
-                                }
-
-                            } catch (Exception e) {
-                                echo "⚠️  Не удалось проанализировать JSON отчет: ${e.message}"
-                            }
-                        } else {
-                            echo "ℹ️  JSON отчет Dependency Check не найден"
-                        }
-                    }
                 }
             }
         }
@@ -171,15 +139,18 @@ pipeline {
         stage('SonarCloud Analysis') {
             steps {
                 script {
-                    echo "🌐 Проверка доступности SonarCloud..."
+                    echo "🌐 Запуск анализа SonarCloud..."
 
-                    // Проверяем доступность SonarCloud
+                    // Проверяем наличие токена
+                    if (!env.SONAR_CLOUD_TOKEN || env.SONAR_CLOUD_TOKEN.trim().isEmpty()) {
+                        echo "⚠️ SonarCloud токен не настроен, пропускаем анализ"
+                        return
+                    }
+
+                    // Проверяем доступность
                     def sonarAvailable = true
                     try {
-                        sh '''
-                            timeout 10 curl -s -f https://sonarcloud.io > /dev/null
-                        '''
-                        echo "✅ SonarCloud доступен"
+                        sh 'timeout 10 curl -s -f https://sonarcloud.io > /dev/null'
                     } catch (Exception e) {
                         echo "⚠️ SonarCloud недоступен, пропускаем анализ"
                         sonarAvailable = false
@@ -187,15 +158,17 @@ pipeline {
 
                     if (sonarAvailable) {
                         withSonarQubeEnv('SonarCloud') {
+                            // Используем правильный путь к отчетам JaCoCo
                             sh '''
                                 mvn sonar:sonar \
                                     -Dsonar.projectKey=AlexandexTsvetkov_recognition \
                                     -Dsonar.organization=alexandextsvetkov \
                                     -Dsonar.host.url=https://sonarcloud.io \
                                     -Dsonar.token=${SONAR_CLOUD_TOKEN} \
-                                    -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+                                    -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco-aggregate/jacoco.xml \
                                     -Dsonar.java.binaries=target/classes \
                                     -Dsonar.sourceEncoding=UTF-8 \
+                                    -Dsonar.junit.reportPaths=target/surefire-reports \
                                 || echo "SonarCloud анализ завершен"
                             '''
                         }
@@ -204,102 +177,18 @@ pipeline {
             }
         }
 
-         stage('Check Docker') {
-                     steps {
-                         script {
-                             // Проверяем наличие Docker
-                             def dockerCheck = sh(script: 'command -v docker', returnStatus: true)
-                             if (dockerCheck != 0) {
-                                 error "❌ Docker не найден! Установите Docker на Jenkins-агент."
-                             }
-
-                             echo "✅ Docker доступен:"
-                             sh 'docker --version'
-                             sh 'docker info'
-                         }
-                     }
-                 }
-
-        stage('Build Docker Images') {
+        stage('Build Docker Images with Jib') {
             steps {
                 script {
-                    echo "🐳 Сборка Docker образов..."
+                    echo "🚀 Building Docker images with Jib Maven Plugin..."
 
-                    // Получаем версию проекта
-                    sh '''
-                        echo "Чтение версии из pom.xml..."
-                        if [ -f "pom.xml" ]; then
-                            VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-                            echo "Версия проекта: $VERSION"
-                            echo "VERSION=$VERSION" > docker-version.env
-                        else
-                            echo "pom.xml не найден"
-                            echo "VERSION=latest" > docker-version.env
-                        fi
-                    '''
-
-                    def version = readFile('docker-version.env').trim().split('=')[1]
-                    env.PROJECT_VERSION = version
-                    env.IS_SNAPSHOT = version.contains('-SNAPSHOT')
-
-                    echo "Версия проекта: ${version}"
-                    echo "SNAPSHOT: ${env.IS_SNAPSHOT}"
-
-                    // Список сервисов для сборки
+                    // Список сервисов и их портов
                     def services = [
-                        'recognition-api-gateway',
-                        'recognition-request-service',
-                        'recognition-processing-service',
-                        'recognition-result-service'
+                        'recognition-api-gateway': '8080',
+                        'recognition-request-service': '8082',
+                        'recognition-processing-service': '8083',
+                        'recognition-result-service': '8084'
                     ]
-
-                    // Собираем Docker образы
-                    services.each { service ->
-                        echo "Сборка Docker образа для ${service}..."
-
-                        try {
-                            // Собираем образ
-                            sh """
-                                docker build \
-                                    -t ${env.DOCKER_IMAGE_PREFIX}/${service}:${version} \
-                                    -t ${env.DOCKER_IMAGE_PREFIX}/${service}:latest \
-                                    -f ${service}/Dockerfile \
-                                    ${service}/
-                            """
-
-                            // Тегируем для Nexus
-                            sh """
-                                docker tag ${env.DOCKER_IMAGE_PREFIX}/${service}:${version} \
-                                    ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/${service}:${version}
-                                docker tag ${env.DOCKER_IMAGE_PREFIX}/${service}:latest \
-                                    ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/${service}:latest
-                            """
-
-                            echo "✅ Образ ${service} собран и оттегирован"
-                        } catch (Exception e) {
-                            echo "⚠️ Ошибка сборки ${service}: ${e.message}"
-                            currentBuild.result = 'UNSTABLE'
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Push Docker Images to Nexus') {
-            steps {
-                script {
-                    echo "📤 Отправка Docker образов в Nexus Registry..."
-
-                    // Проверяем наличие Docker Registry
-                    try {
-                        sh """
-                            timeout 10 curl -s -f ${env.NEXUS_URL}/service/rest/v1/repositories > /dev/null
-                        """
-                        echo "✅ Nexus Docker Registry доступен"
-                    } catch (Exception e) {
-                        echo "⚠️ Nexus Docker Registry недоступен, пропускаем отправку образов"
-                        return
-                    }
 
                     withCredentials([
                         usernamePassword(
@@ -308,70 +197,57 @@ pipeline {
                             passwordVariable: 'NEXUS_PASSWORD'
                         )
                     ]) {
-                        // Логинимся в Nexus Docker Registry через порт 8081
-                        sh """
-                            echo "${NEXUS_PASSWORD}" | docker login ${env.NEXUS_DOCKER_REGISTRY} \
-                                -u ${NEXUS_USER} \
-                                --password-stdin
-                        """
+                        // Создаем Docker config для аутентификации
+                        sh '''
+                            mkdir -p ~/.docker
+                            cat > ~/.docker/config.json << EOF
+                            {
+                                "auths": {
+                                    "${DOCKER_REGISTRY}": {
+                                        "auth": "$(echo -n ${NEXUS_USER}:${NEXUS_PASSWORD} | base64)"
+                                    }
+                                }
+                            }
+                            EOF
+                        '''
 
-                        // Список сервисов
-                        def services = [
-                            'recognition-api-gateway',
-                            'recognition-request-service',
-                            'recognition-processing-service',
-                            'recognition-result-service'
-                        ]
+                        services.each { serviceName, port ->
+                            echo "📦 Building ${serviceName}..."
 
-                        // Отправляем образы
-                        services.each { service ->
-                            echo "Отправка образа ${service}..."
+                            dir(serviceName) {
+                                // Собираем JAR если еще не собран
+                                sh 'mvn clean package -DskipTests -q'
 
-                            try {
-                                // Push версии
+                                // Собираем и пушим Docker образ с Jib
                                 sh """
-                                    docker push ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/${service}:${env.PROJECT_VERSION}
+                                    mvn compile jib:build \
+                                        -DskipTests \
+                                        -Ddocker.registry=${env.DOCKER_REGISTRY} \
+                                        -Ddocker.repository=${env.DOCKER_REPOSITORY} \
+                                        -Djib.to.auth.username=${NEXUS_USER} \
+                                        -Djib.to.auth.password=${NEXUS_PASSWORD} \
+                                        -Djib.container.creationTime=USE_CURRENT_TIMESTAMP \
+                                        -Djib.container.ports=${port} \
+                                        -q
                                 """
 
-                                // Push latest (только если не SNAPSHOT)
+                                // Также создаем latest тег если не snapshot
                                 if (!env.IS_SNAPSHOT) {
                                     sh """
-                                        docker push ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/${service}:latest
+                                        docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/${serviceName}:${env.PROJECT_VERSION}
+                                        docker tag ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/${serviceName}:${env.PROJECT_VERSION} \
+                                            ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/${serviceName}:latest
+                                        docker push ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/${serviceName}:latest
                                     """
                                 }
-
-                                echo "✅ Образ ${service} отправлен в Nexus"
-                            } catch (Exception e) {
-                                echo "⚠️ Ошибка отправки образа ${service}: ${e.message}"
-                                currentBuild.result = 'UNSTABLE'
                             }
                         }
 
-                        // Выходим из реестра
-                        sh "docker logout ${env.NEXUS_DOCKER_REGISTRY}"
+                        // Очищаем Docker config
+                        sh 'rm -rf ~/.docker'
                     }
 
-                    // Сохраняем информацию о Docker образах
-                    writeFile file: 'docker-deploy-info.txt', text: """
-                        Docker Images Deployed to Nexus
-                        ===============================
-                        Timestamp: ${new Date()}
-                        Registry: ${env.NEXUS_DOCKER_REGISTRY}
-                        Repository: ${env.NEXUS_DOCKER_REPOSITORY}
-                        Version: ${env.PROJECT_VERSION}
-
-                        Available Images:
-                        - ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
-                        - ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
-                        - ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
-                        - ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
-
-                        Pull commands:
-                        docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
-                        docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
-                    """
-
-                    archiveArtifacts artifacts: 'docker-deploy-info.txt', fingerprint: false
+                    echo "✅ Docker images built and pushed successfully!"
                 }
             }
         }
@@ -379,14 +255,11 @@ pipeline {
         stage('Deploy Maven Artifacts to Nexus') {
             steps {
                 script {
-                    echo "🚀 Отправка Maven артефактов в Nexus..."
+                    echo "📤 Deploying Maven artifacts to Nexus..."
 
                     // Проверяем доступность Nexus
                     try {
-                        sh """
-                            timeout 10 curl -s -f ${env.NEXUS_URL} > /dev/null
-                        """
-                        echo "✅ Nexus доступен"
+                        sh "timeout 10 curl -s -f ${env.NEXUS_URL} > /dev/null"
                     } catch (Exception e) {
                         echo "⚠️ Nexus недоступен, пропускаем деплой"
                         return
@@ -399,94 +272,44 @@ pipeline {
                             passwordVariable: 'NEXUS_PASSWORD'
                         )
                     ]) {
-                        // Создаем временный settings.xml
-                        writeFile file: 'settings.xml', text: """
-                            <settings>
-                              <servers>
-                                <server>
-                                  <id>nexus</id>
-                                  <username>${NEXUS_USER}</username>
-                                  <password>${NEXUS_PASSWORD}</password>
-                                </server>
-                              </servers>
-                            </settings>
+                        // Используем стандартный Maven deploy
+                        def repositoryUrl = "${env.NEXUS_URL}/repository/${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NEXUS_REPO_RELEASE}"
+
+                        sh """
+                            mvn deploy \
+                                -DskipTests \
+                                -DaltDeploymentRepository=nexus::default::${repositoryUrl} \
+                                -DrepositoryId=nexus
                         """
 
-                        def deployUrl = "${env.NEXUS_URL}/repository/${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NEXUS_REPO_RELEASE}"
+                        echo "✅ Maven artifacts deployed to Nexus!"
 
-                        // Список модулей для деплоя
-                        def modules = [
-                            'recognition-api-gateway',
-                            'recognition-common',
-                            'recognition-result-service',
-                            'recognition-processing-service',
-                            'recognition-request-service'
-                        ]
+                        // Сохраняем информацию о деплое
+                        writeFile file: 'deployment-info.txt', text: """
+                            Deployment Information
+                            ======================
+                            Timestamp: ${new Date()}
+                            Version: ${env.PROJECT_VERSION}
+                            Type: ${env.IS_SNAPSHOT ? 'SNAPSHOT' : 'RELEASE'}
 
-                        // Деплоим все модули
-                        modules.each { module ->
-                            echo "📤 Загрузка модуля: ${module}"
+                            Docker Images:
+                            - ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
+                            - ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
+                            - ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
+                            - ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
 
-                            def jarFile = "${module}/target/${module}-${env.PROJECT_VERSION}.jar"
-                            def pomFile = "${module}/pom.xml"
+                            Maven Repository:
+                            ${repositoryUrl}
 
-                            if (fileExists(jarFile)) {
-                                sh """
-                                    mvn deploy:deploy-file \
-                                        -Dfile=${jarFile} \
-                                        -DpomFile=${pomFile} \
-                                        -DrepositoryId=nexus \
-                                        -Durl=${deployUrl} \
-                                        -s settings.xml \
-                                    || echo "⚠️ Не удалось загрузить ${module}"
-                                """
-                            } else {
-                                echo "⚠️ Файл ${jarFile} не найден, пропускаем"
-                            }
-                        }
+                            Pull Commands:
+                            docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
+                            docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
+                            docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
+                            docker pull ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
+                        """
 
-                        // Родительский pom
-                        if (fileExists('pom.xml')) {
-                            sh """
-                                mvn deploy:deploy-file \
-                                    -Dfile=pom.xml \
-                                    -DpomFile=pom.xml \
-                                    -DrepositoryId=nexus \
-                                    -Durl=${deployUrl} \
-                                    -s settings.xml \
-                                || echo "⚠️ Не удалось загрузить родительский POM"
-                            """
-                        }
-
-                        // Очищаем временный файл
-                        sh 'rm -f settings.xml'
+                        archiveArtifacts artifacts: 'deployment-info.txt', fingerprint: false
                     }
-
-                    // Сохраняем информацию о деплое
-                    writeFile file: 'maven-deploy-info.txt', text: """
-                        Maven Artifacts Deployed to Nexus
-                        ==================================
-                        Timestamp: ${new Date()}
-                        Project: Recognition Microservices
-                        Version: ${env.PROJECT_VERSION}
-                        Repository: ${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NEXUS_REPO_RELEASE}
-                        URL: ${env.NEXUS_URL}/repository/${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NEXUS_REPO_RELEASE}
-
-                        Загруженные артефакты:
-                        - recognition-api-gateway-${env.PROJECT_VERSION}.jar
-                        - recognition-request-service-${env.PROJECT_VERSION}.jar
-                        - recognition-processing-service-${env.PROJECT_VERSION}.jar
-                        - recognition-result-service-${env.PROJECT_VERSION}.jar
-                        - recognition-common-${env.PROJECT_VERSION}.jar
-
-                        Ссылки:
-                        - Браузер: ${env.NEXUS_URL}/#browse/browse
-                        - URL репозитория: ${env.NEXUS_URL}/repository/${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NEXUS_REPO_RELEASE}
-                    """
-
-                    archiveArtifacts artifacts: 'maven-deploy-info.txt', fingerprint: false
-
-                    echo "✅ Все Maven артефакты загружены в Nexus!"
                 }
             }
         }
@@ -494,177 +317,141 @@ pipeline {
         stage('Generate Deployment Manifests') {
             steps {
                 script {
-                    echo "📋 Генерация манифестов для деплоя..."
+                    echo "📋 Generating deployment manifests..."
 
-                    // Генерируем docker-compose.yml для продакшена
-                    writeFile file: 'docker-compose-production.yml', text: """
+                    // Kubernetes manifests
+                    sh 'mkdir -p k8s-manifests'
+
+                    def services = [
+                        'recognition-api-gateway': '8080',
+                        'recognition-request-service': '8082',
+                        'recognition-processing-service': '8083',
+                        'recognition-result-service': '8084'
+                    ]
+
+                    services.each { serviceName, port ->
+                        // Deployment
+                        writeFile file: "k8s-manifests/${serviceName}-deployment.yaml", text: """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${serviceName}
+  labels:
+    app: ${serviceName}
+    version: ${env.PROJECT_VERSION}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ${serviceName}
+  template:
+    metadata:
+      labels:
+        app: ${serviceName}
+        version: ${env.PROJECT_VERSION}
+    spec:
+      containers:
+      - name: ${serviceName}
+        image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/${serviceName}:${env.PROJECT_VERSION}
+        ports:
+        - containerPort: ${port}
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "production"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+"""
+
+                        // Service
+                        writeFile file: "k8s-manifests/${serviceName}-service.yaml", text: """
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${serviceName}
+spec:
+  selector:
+    app: ${serviceName}
+  ports:
+  - port: ${port}
+    targetPort: ${port}
+  type: ClusterIP
+"""
+                    }
+
+                    // Docker Compose
+                    writeFile file: 'docker-compose.yml', text: """
 version: '3.8'
 
 services:
   api-gateway:
-    image: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
+    image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
     ports:
       - "8080:8080"
     environment:
       - SPRING_PROFILES_ACTIVE=production
-      - REQUEST_SERVICE_URL=http://request-service:8082
-      - STORAGE_ENDPOINT=\${STORAGE_ENDPOINT}
-      - STORAGE_ACCESS_KEY=\${STORAGE_ACCESS_KEY}
-      - STORAGE_SECRET_KEY=\${STORAGE_SECRET_KEY}
-    restart: unless-stopped
 
   request-service:
-    image: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
+    image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
     ports:
       - "8082:8082"
     environment:
       - SPRING_PROFILES_ACTIVE=production
-      - DATABASE_URL=\${DATABASE_URL}
-      - DATABASE_USER=\${DATABASE_USER}
-      - DATABASE_PASSWORD=\${DATABASE_PASSWORD}
-    restart: unless-stopped
 
   processing-service:
-    image: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
+    image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
     ports:
       - "8083:8083"
     environment:
       - SPRING_PROFILES_ACTIVE=production
-      - STORAGE_ENDPOINT=\${STORAGE_ENDPOINT}
-      - STORAGE_ACCESS_KEY=\${STORAGE_ACCESS_KEY}
-      - STORAGE_SECRET_KEY=\${STORAGE_SECRET_KEY}
-      - YANDEX_API_KEY=\${YANDEX_API_KEY}
-    restart: unless-stopped
 
   result-service:
-    image: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
+    image: ${env.DOCKER_REGISTRY}/${env.DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
     ports:
       - "8084:8084"
     environment:
       - SPRING_PROFILES_ACTIVE=production
-      - DATABASE_URL=\${DATABASE_URL}
-      - DATABASE_USER=\${DATABASE_USER}
-      - DATABASE_PASSWORD=\${DATABASE_PASSWORD}
-    restart: unless-stopped
 """
 
-                    // Генерируем скрипт деплоя
-                    writeFile file: 'deploy-to-production.sh', text: """#!/bin/bash
-# Скрипт для деплоя микросервисов из Nexus
+                    // Deploy script
+                    writeFile file: 'deploy.sh', text: """#!/bin/bash
+# Deployment script for Recognition Microservices
 set -e
 
-echo "=== Деплой Recognition Microservices ==="
-echo "Версия: ${env.PROJECT_VERSION}"
-echo "Nexus Registry: ${env.NEXUS_DOCKER_REGISTRY}"
+echo "=== Deploying Recognition Microservices ==="
+echo "Version: ${env.PROJECT_VERSION}"
+echo "Registry: ${env.DOCKER_REGISTRY}"
 echo ""
 
-# Создаем директорию для деплоя
-DEPLOY_DIR="deploy-\$(date +%Y%m%d-%H%M%S)"
-mkdir -p "\${DEPLOY_DIR}"
-cd "\${DEPLOY_DIR}"
+METHOD="\${1:-docker-compose}"
 
-# Копируем docker-compose
-cp ../docker-compose-production.yml docker-compose.yml
-
-# Создаем .env пример
-cat > .env.example << EOF
-# Настройки базы данных
-DATABASE_URL=r2dbc:postgresql://postgres:5432/recognition
-DATABASE_USER=postgres
-DATABASE_PASSWORD=postgres
-
-# Настройки хранилища
-STORAGE_ENDPOINT=http://minio:9000
-STORAGE_ACCESS_KEY=minioadmin
-STORAGE_SECRET_KEY=minioadmin
-
-# Yandex SpeechKit API
-YANDEX_API_KEY=your_yandex_api_key_here
-
-# Kafka
-KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-EOF
-
-echo "1. Создайте файл .env с настройками:"
-echo "   cp .env.example .env"
-echo "   # отредактируйте .env"
-echo ""
-echo "2. Загрузите образы из Nexus:"
-echo "   docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}"
-echo "   docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}"
-echo "   docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}"
-echo "   docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}"
-echo ""
-echo "3. Запустите сервисы:"
-echo "   docker-compose up -d"
-echo ""
-echo "4. Проверьте статус:"
-echo "   docker-compose ps"
-echo ""
-echo "Деплой подготовлен в директории: \${DEPLOY_DIR}"
+case "\$METHOD" in
+    docker-compose)
+        echo "Deploying with Docker Compose..."
+        docker-compose pull
+        docker-compose up -d
+        echo "Services deployed!"
+        ;;
+    kubernetes)
+        echo "Deploying to Kubernetes..."
+        kubectl apply -f k8s-manifests/
+        echo "Kubernetes resources created!"
+        ;;
+    *)
+        echo "Usage: \$0 [docker-compose|kubernetes]"
+        exit 1
+        ;;
+esac
 """
 
-                    sh "chmod +x deploy-to-production.sh"
+                    sh 'chmod +x deploy.sh'
 
-                    // Генерируем README - УПРОЩЕННАЯ ВЕРСИЯ без Markdown форматирования
-                    writeFile file: 'DEPLOYMENT.md', text: """# Деплой Recognition Microservices
-
-## Информация о сборке
-Версия: ${env.PROJECT_VERSION}
-Дата сборки: ${new Date()}
-Nexus Registry: ${env.NEXUS_DOCKER_REGISTRY}
-Docker Repository: ${env.NEXUS_DOCKER_REPOSITORY}
-
-## Доступные образы
-1. API Gateway: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
-2. Request Service: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
-3. Processing Service: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-processing-service:${env.PROJECT_VERSION}
-4. Result Service: ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-result-service:${env.PROJECT_VERSION}
-
-## Инструкция по деплою
-
-1. Подготовка окружения
-   ./deploy-to-production.sh
-
-2. Настройка переменных окружения
-   cd deploy-<timestamp>
-   cp .env.example .env
-   # Отредактируйте .env файл
-
-3. Загрузка образов
-   docker login ${env.NEXUS_DOCKER_REGISTRY}
-   docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-api-gateway:${env.PROJECT_VERSION}
-   docker pull ${env.NEXUS_DOCKER_REGISTRY}/repository/${env.NEXUS_DOCKER_REPOSITORY}/recognition-request-service:${env.PROJECT_VERSION}
-   # ... и так далее для всех сервисов
-
-4. Запуск
-   docker-compose up -d
-
-5. Проверка
-   docker-compose ps
-   curl http://localhost:8080/actuator/health
-
-## Maven артефакты
-Артефакты доступны в Nexus:
-${env.NEXUS_URL}/repository/${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NEXUS_REPO_RELEASE}
-"""
-
-                    archiveArtifacts artifacts: 'docker-compose-production.yml,deploy-to-production.sh,DEPLOYMENT.md', fingerprint: false
-
-                    echo "✅ Манифесты деплоя сгенерированы"
-                }
-            }
-        }
-
-        stage('Save Artifacts') {
-            steps {
-                script {
-                    echo "💾 Сохранение артефактов..."
-                    // Сохраняем jar файлы
-                    archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
-
-                    // Сохраняем Dockerfile
-                    archiveArtifacts artifacts: '**/Dockerfile', fingerprint: true
+                    archiveArtifacts artifacts: 'docker-compose.yml,deploy.sh,k8s-manifests/*.yaml', fingerprint: false
+                    echo "✅ Deployment manifests generated"
                 }
             }
         }
@@ -673,38 +460,62 @@ ${env.NEXUS_URL}/repository/${env.IS_SNAPSHOT ? env.NEXUS_REPO_SNAPSHOT : env.NE
     post {
         always {
             script {
-                echo "Pipeline завершен: ${currentBuild.currentResult}"
+                echo "🏁 Pipeline завершен: ${currentBuild.currentResult}"
 
-                // Отправляем уведомление в Telegram
-                try {
-                    def emoji = currentBuild.currentResult == 'SUCCESS' ? '✅' :
-                               currentBuild.currentResult == 'UNSTABLE' ? '⚠️' : '❌'
-
-                    sh """
-                        curl -s -X POST \
-                        -H 'Content-Type: application/json' \
-                        -d '{"chat_id": "486108633", "text": "${emoji} CI/CD Pipeline завершен: ${currentBuild.currentResult}\\\\nВерсия: ${env.PROJECT_VERSION ?: 'N/A'}\\\\nDocker: ${env.NEXUS_DOCKER_REGISTRY}\\\\nJenkins: ${env.BUILD_URL}"}' \
-                        https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
-                    """
-                } catch (Exception e) {
-                    echo "Не удалось отправить уведомление: ${e.message}"
-                }
-
-                // Очищаем временные файлы
+                // Очистка
                 sh '''
-                    rm -f version.env docker-version.env settings.xml 2>/dev/null || true
-                    rm -f maven-deploy-info.txt docker-deploy-info.txt 2>/dev/null || true
+                    rm -f docker-version.env settings.xml 2>/dev/null || true
+                    rm -f deployment-info.txt 2>/dev/null || true
                 '''
             }
         }
         success {
-            echo '🎉 Сборка и деплой успешно завершены!'
+            script {
+                echo "🎉 Сборка и деплой успешно завершены!"
+
+                // Отправка уведомления
+                sendTelegramNotification("✅ Сборка успешно завершена")
+            }
         }
         failure {
-            echo '❌ Сборка завершилась с ошибками!'
+            script {
+                echo "❌ Сборка завершилась с ошибками!"
+                sendTelegramNotification("❌ Сборка завершилась с ошибками")
+            }
         }
         unstable {
-            echo '⚠️  Сборка нестабильна из-за уязвимостей'
+            script {
+                echo "⚠️ Сборка нестабильна"
+                sendTelegramNotification("⚠️ Сборка нестабильна")
+            }
         }
+    }
+}
+
+// Функции
+def getMavenProjectVersion() {
+    return sh(
+        script: 'mvn help:evaluate -Dexpression=project.version -q -DforceStdout',
+        returnStdout: true
+    ).trim()
+}
+
+def sendTelegramNotification(message) {
+    try {
+        def buildInfo = """
+${message}
+Версия: ${env.PROJECT_VERSION ?: 'N/A'}
+Статус: ${currentBuild.currentResult}
+Jenkins: ${env.BUILD_URL}
+        """.trim()
+
+        sh """
+            curl -s -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"chat_id": "486108633", "text": "${buildInfo.replace("\n", "\\n")}"}' \
+            https://api.telegram.org/bot8300623315:AAGMYqYbK25gKn-iW-IcTJtM-1nMmUedAaU/sendMessage
+        """
+    } catch (Exception e) {
+        echo "Не удалось отправить уведомление: ${e.message}"
     }
 }

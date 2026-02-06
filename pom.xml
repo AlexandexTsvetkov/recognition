@@ -32,6 +32,12 @@
         <maven-compiler-plugin.version>3.8.1</maven-compiler-plugin.version>
         <protobuf-plugin.version>2.4.0</protobuf-plugin.version>
         <jacoco.version>0.8.12</jacoco.version>
+        <docker.registry>31.186.103.242:8081</docker.registry>
+        <docker.repository>repository/docker-hosted</docker.repository>
+        <docker.namespace>recognition</docker.namespace>
+        <jib.skip>false</jib.skip>
+        <jib.from.image>eclipse-temurin:21-jre-alpine</jib.from.image>
+        <jib.container.creationTime>USE_CURRENT_TIMESTAMP</jib.container.creationTime>
     </properties>
     
     <dependencyManagement>

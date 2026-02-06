@@ -14,6 +14,9 @@
     <packaging>jar</packaging>
     <name>Recognition Processing Service</name>
     <description>Service for processing speech recognition tasks</description>
+    <properties>
+        <service.port>8083</service.port>
+    </properties>
     
     <dependencies>
         <dependency>
@@ -143,6 +146,39 @@
                 <groupId>org.sonarsource.scanner.maven</groupId>
                 <artifactId>sonar-maven-plugin</artifactId>
                 <version>3.9.1.2184</version>
+            </plugin>
+            <plugin>
+                <groupId>com.google.cloud.tools</groupId>
+                <artifactId>jib-maven-plugin</artifactId>
+                <version>3.2.1</version>
+                <configuration>
+                    <from>
+                        <image>${jib.from.image}</image>
+                    </from>
+                    <to>
+                        <image>${docker.registry}/${docker.repository}/${project.artifactId}:${project.version}</image>
+                        <tags>
+                            <tag>latest</tag>
+                        </tags>
+                    </to>
+                    <container>
+                        <ports>
+                            <port>${service.port}</port>
+                        </ports>
+                        <creationTime>${jib.container.creationTime}</creationTime>
+                        <environment>
+                            <SPRING_PROFILES_ACTIVE>production</SPRING_PROFILES_ACTIVE>
+                        </environment>
+                    </container>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>build</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
